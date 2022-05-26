@@ -1,0 +1,4657 @@
+id:@p:sentientSites:r:209b732b-551a619a "Sentient Sites"
+name:sentienSites
+dis:Sentient Sites
+doc:All Sentient Projects
+evalTimeout:10min
+mod:2022-04-27T01:53:31.385Z
+projMeta
+siteUri:`https://skyspark.sentientsite.com:8443/`
+version:"3.1.3"
+---
+id:@p:sentientSites:r:209b7cf5-75e8ddec "p:sentientSites:r:209b7cf5-75e8ddec"
+equipPath:"/region/site/floor/tenant/equip/point"
+kpiPath:"/kpi"
+mod:2018-10-10T17:52:49.666Z
+navMeta
+programPath:"/program"
+rulePath:"/rule"
+tz:New_York
+---
+id:@p:sentientSites:r:271b600a-0a9116b7 "Apartment temp is too high during heating season at Michaelangelo"
+name:bpAptTempTooHighMichaelangelo
+dis:Apartment temp is too high during heating season at Michaelangelo
+func
+mod:2020-10-17T13:42:13.266Z
+sparkRule
+src:
+  (point, dates, highTemp, periodLength) => do
+    // is one of the ambient temp sensors above a specific threshold (highTemp)?
+    // equip query: equip and ahu
+    // point query: point and zone
+  
+    faults: [].toGrid()
+    // optional heating season month check
+    // if (dates.month().as(1) > 9 or dates.month().as(1) < 5) do
+    faults = point.hisRead(dates)
+              .hisFindPeriods(r => r > highTemp)
+              .hisFindAll(r => r > periodLength)
+  
+    // end optional month check
+    // end
+    
+    return faults
+    
+  end
+  
+---
+id:@p:sentientSites:r:2639a4d6-872bd897 "bpAhuShortcycling"
+name:bpAhuShortcycling
+func
+mod:2020-05-18T15:14:07.816Z
+src:
+  (ahu, dates, minOffTime, minOnTime) => do
+    // Has AHU status turned on/off (cycled) more than then maximum allowed times 
+    // (maxAllowedCycles) in a given period of time?
+    // equip query: equip and ahu
+    // point query: point and ahu and enable and cmd
+    
+    ahuSensor: readAll(ahu and enable and cmd and equipRef==toRecId(ahu)).first
+  
+    if (ahuSensor == null or isEmpty(ahuSensor)) return null
+    
+    return shortCycling(ahuSensor, dates, minOffTime, minOnTime) 
+  end
+  
+---
+id:@p:sentientSites:r:2644928a-c4e1f9c5 "bpAptTempTooHigh"
+name:bpAptTempTooHigh
+func
+mod:2020-11-18T17:02:13.005Z
+pod1
+src:
+  (aptAHU, dates, highTemp, periodLength) => do
+    // is one of the ambient temp sensors above a specific threshold (highTemp)?
+    // equip query: equip and ahu
+    // point query: point and zone
+  
+    aptTempSensors: readAll(zone and equipRef==toRecId(aptAHU))
+  
+    if (isEmpty(aptTempSensors)) return null
+  
+    listSensorGrids: []
+    times(aptTempSensors.size) x => do
+      listSensorGrids = listSensorGrids.add(
+       aptTempSensors[x]
+         .hisRead(dates)
+         .hisFindPeriods(temp => temp > highTemp)
+         .hisFindAll(p => p >= periodLength)
+      )
+    end
+  
+    return hisPeriodUnion(listSensorGrids)
+  end
+  
+---
+id:@p:sentientSites:r:25cc5cc0-76f3a0f8 "bpAptTempTooHigh95"
+name:bpAptTempTooHigh95
+func
+mod:2020-02-05T18:12:20.221Z
+src:
+  (equip,dates) => do
+    // is one of the ambient temp sensors >95°F
+    // equip tags are aptTemp
+    // point tags are aptHighTemp95
+  
+    highTemp: 95°F
+    periodLength: 1min
+    aptTempSensor: read(aptHighTemp95 and equipRef->id==equip->id)
+  
+    if (aptTempSensor == null) return null
+  
+    faultGrid: aptTempSensor.hisRead(dates).hisFindPeriods(temp => temp > highTemp).hisFindAll(p => p >= periodLength)
+  
+    return faultGrid
+  end
+---
+id:@p:sentientSites:r:27384bc1-87f2f930 "bpAptTempTooHighAndPumpsRunningMichaelangelo"
+name:bpAptTempTooHighAndPumpsRunningMichaelangelo
+func
+mod:2021-10-15T15:13:46.239Z
+src:
+  (tempPoint, dates, highTemp, periodLength) => do
+    // needs to run on point and temp and zone 
+    
+    tempGrid: [].toGrid()
+    
+    // Heating season month check
+    if (dates.month().as(1) > 9 or dates.month().as(1) < 6) do
+  
+      // Find space temperatures that are over high temp of 74
+      tempGrid = tempPoint
+                .hisRead(dates)
+                .hisFindPeriods(temp => temp > highTemp)
+                .hisFindAll(p => p > periodLength)
+    end
+    
+    if (tempGrid.isEmpty()) return null 
+    
+    // Query to get pump set  
+    pumpSet: try (tempPoint->pumpRef) catch null
+    if (pumpSet == null) return null       
+    
+    pumps: readAll(equip and equipRef==(pumpSet))
+    if (pumps.isEmpty()) return null
+    
+    pumpRuntimesList: []
+      
+    pumps.each pump => do
+      pumpRuntimesList = pumpRuntimesList.add(pump.equipRuntimePeriods(dates))
+    end
+    
+    if (isEmpty(pumpRuntimesList)) return null
+    
+    // Union pump runtime grids and add 1 hour to total runtime
+    pumpRuntimeUnion: hisPeriodUnion(pumpRuntimesList).hisPeriodShift(0hr, 1hr)
+  
+    // Find periods when both pump is on and space temperature is over 74
+    return hisPeriodIntersection([tempGrid, pumpRuntimeUnion]).hisFindAll(p => p > periodLength)
+  end
+---
+id:@p:sentientSites:r:264492a5-3be14a6f "bpAptTempTooHighHeatingSeason"
+name:bpAptTempTooHighHeatingSeason
+func
+mod:2020-11-18T17:02:30.429Z
+pod1
+src:
+  (aptAHU, dates, highTemp, oaLowTemp, periodLength) => do
+    // is one of the ambient temp sensors above a specific threshold (highTemp),
+    // during heating season (defined by temp < oaLowTemp)?
+    // equip query: equip and ahu
+    // point query: point and zone
+  
+    aptTempSensors: readAll(zone and equipRef==toRecId(aptAHU))
+  
+    if (isEmpty(aptTempSensors)) return null
+  
+    listSensorGrids: []
+    times(aptTempSensors.size) x => do
+      listSensorGrids = listSensorGrids.add(
+       aptTempSensors[x]
+         .hisRead(dates)
+         .hisFindPeriods(temp => temp > highTemp)
+         .hisFindAll(p => p >= periodLength)
+      )
+    end
+    
+    // union of all temperature grids exceeding expected range
+    tempGrid: hisPeriodUnion(listSensorGrids)
+    if (isEmpty(tempGrid)) return null
+    
+    // find outdoor air temperature record 
+    oaGrid: bpFindWeatherData(aptAHU, dates).hisFindPeriods(temp => temp < oaLowTemp)
+  
+    // combine both temp records to find full fault grid
+    return hisPeriodIntersection([tempGrid, oaGrid]).hisFindAll(p => p >= periodLength)
+  end
+  
+---
+id:@p:sentientSites:r:264492c4-6834b8d2 "bpAptTempTooLow"
+name:bpAptTempTooLow
+func
+mod:2021-01-21T19:22:48.908Z
+pod1
+src:
+  (point, dates, lowTemp, periodLength) => do
+    // is one of the ambient temp sensors below a specific threshold (lowTemp) during the heating season?
+    // point query: point and zone and equipRef->zone and not deviceStatus and not status
+  
+    faults: []
+    // optional heating season month check
+    if (dates.month().as(1) > 9 or dates.month().as(1) < 6) do 
+      faults = point.hisRead(dates)
+              .hisFindPeriods(temp => not isNaN(temp) and temp < lowTemp)
+              .hisFindAll(p => p >= periodLength)
+    end
+    
+    if (isEmpty(faults)) return null
+  
+    return faults
+    
+  end
+  
+---
+id:@p:sentientSites:r:2685640a-232b4a1b "bpAvgAptTemps"
+name:bpAvgAptTemps
+func
+mod:2020-06-24T01:20:05.559Z
+src:
+  (equip, dates) => do
+    // grab zone temps
+    sensor: readAll(zone and temp and sensor and equipRef==equip->id, false)
+    if (sensor == null) return null
+  
+    // Section that separates zone temps by floor
+    
+   
+    // get temps
+    temps: hisRead(sensor, dates)
+  
+    // return avg
+    {avg: temps.foldCol("v0", avg)}
+  end
+---
+id:@p:sentientSites:r:265aa270-1cc27afa "bpBoilerPressureHighWhileOaTempHigh"
+name:bpBoilerPressureHighWhileOaTempHigh
+func
+mod:2020-05-22T16:08:17.124Z
+src:
+  (boiler, dates, highPressure, maxOaTemp, periodLength) => do
+    // Is the boiler steam pressure while the outdoor air temperature 
+    // (maxOaTemp) does not call for heat?
+    // equip query: equip and boiler and plant and steam
+    // point query: point and steam and header and pressure
+  
+    // get the fault grid for steam pressure
+    faultPressureGrid: bpBoilerPressureTooHigh(boiler, dates, highPressure, periodLength)
+    if (faultPressureGrid == null or isEmpty(faultPressureGrid)) return null
+      
+    // get the outdoor air temperature
+    oaGrid: bpFindWeatherData(boiler, dates).hisFindPeriods(temp => temp > maxOaTemp)
+    if (oaGrid == null or isEmpty(oaGrid)) return null
+    
+    // combine records to find the fault grid for pressure under temp conditions
+    return hisPeriodIntersection([faultPressureGrid, oaGrid]).hisFindAll(p => p >= periodLength)
+  end
+  
+---
+id:@p:sentientSites:r:265aad29-ef8b4ec4 "bpBoilerPressureLowWhileOaTempLow"
+name:bpBoilerPressureLowWhileOaTempLow
+func
+mod:2020-07-01T17:57:26.702Z
+src:
+  (boiler, dates, lowPressure, lowOaTempDay, lowOaTempNight, periodLength) => do
+    // Is the boiler steam pressure low while the outdoor air temperature calls for heat?
+    // equip query: equip and boiler and plant and steam
+    // point query: point and steam and header and pressure
+  
+    // get the fault grid for steam pressure
+    faultPressureGrid: bpBoilerPressureTooLow(boiler, dates, lowPressure, periodLength)
+    if (faultPressureGrid == null or isEmpty(faultPressureGrid)) return null
+      
+    // get the outdoor air temperature
+    oaGrid: bpFindWeatherData(boiler, dates) 
+    
+    // filter to the low air temps for day (6am to 10pm) and night (10pm to 6am)
+    filteredOaGrid: oaGrid.hisFindPeriods((val, ts, his) => (
+        (ts.time >= time(6, 00) and ts.time <= time(22, 00) and val <= lowOaTempDay) or 
+        ((ts.time > time(22, 00) or ts.time < time(6, 00)) and val <= lowOaTempNight) 
+    ))
+    if (filteredOaGrid == null or isEmpty(filteredOaGrid)) return null
+    
+    // combine records to find the fault grid for pressure under temp conditions
+    return hisPeriodIntersection([faultPressureGrid, oaGrid]).hisFindAll(p => p >= periodLength)
+  end
+  
+---
+id:@p:sentientSites:r:265a9918-b386ae02 "bpBoilerPressureTooHigh"
+name:bpBoilerPressureTooHigh
+func
+mod:2020-05-22T16:50:01.534Z
+src:
+  (boiler, dates, highPressure, periodLength) => do
+    //  Is the boiler steam pressure too high, for a specified amount of time?
+    // equip query: equip and boiler and plant and steam
+    // point query: point and steam and header and pressure
+  
+    boilerSensor: readAll(point and steam and header and pressure and equipRef==toRecId(boiler)).first
+    
+    if (boilerSensor == null) return null
+      
+    resultGrid: boilerSensor
+                .hisRead(dates)
+                .hisFindPeriods(pressure => pressure > highPressure)
+                .hisFindAll(p => p >= periodLength)
+    
+    return resultGrid
+  end
+  
+---
+id:@p:sentientSites:r:265ab35d-c719232d "bpBoilerPressureTooLow"
+name:bpBoilerPressureTooLow
+func
+mod:2020-05-22T16:50:30.934Z
+src:
+  (boiler, dates, lowPressure, periodLength) => do
+    // Is the boiler steam pressure too low, for a specified amount of time?
+    // equip query: equip and boiler and plant and steam
+    // point query: point and steam and header and pressure
+  
+    boilerSensor: readAll(point and steam and header and pressure and equipRef==toRecId(boiler)).first
+    
+    if (boilerSensor == null) return null
+      
+    resultGrid: boilerSensor
+                .hisRead(dates)
+                .hisFindPeriods(pressure => pressure < lowPressure)
+                .hisFindAll(p => p >= periodLength)
+    
+    return resultGrid
+  end
+  
+---
+id:@p:sentientSites:r:26557157-e6e9f500 "bpBoilersDeviatingFromSetpoint"
+name:bpBoilersDeviatingFromSetpoint
+func
+mod:2020-11-18T17:07:49.919Z
+pod1
+src:
+  (boiler, dates, deltaHigh, oaHighTemp, periodLength) => do
+    // Are boiler points maintaining the temperature set points within a range (specified
+    // by deltaHigh parameter) when the outside temperature exceeds a certain temperature (oaHighTemp)?
+    // equip query: equip and boiler and not controller
+    // controller query: equip and boiler and controller
+    // controller setPoint query: point and sp
+    // point query set point: point and hot and water and leaving and temp
+  
+    // find the set point at the property; need to find the controller
+    siteRef: boiler["siteRef"]
+    controller: readAll(equip and boiler and controller and siteRef==toRecId(siteRef)).first
+    if (controller == null) return null
+    
+    // find the set point temperature point on the controller -- is this too nonspecific?
+    setPointTemp: readAll(point and sp and equipRef==toRecId(controller)).first
+    if (setPointTemp == null) return null
+    
+    // find the temperature on the boiler equip to compare with controller set point temp
+    boilerHwTemp: readAll(point and hot and water and leaving and temp and equipRef==toRecId(boiler)).first
+    if (boilerHwTemp == null) return null
+    
+    // calculates the difference between the temperature and the setpoint
+    diffGrid: bpTempDiff(boilerHwTemp, setPointTemp, dates)
+          
+    // find where the difference between setpoint temp and boiler hw temp is more than x degrees
+    tempGrid: diffGrid.hisFindPeriods(diff => abs(diff) > deltaHigh) 
+  
+    // now compare with weather data -- find outdoor air temperature record 
+    oaGrid: bpFindWeatherData(boiler, dates).hisFindPeriods(temp => temp > oaHighTemp)
+  
+    // combine both temp records to find full fault grid
+    return hisPeriodIntersection([tempGrid, oaGrid]).hisFindAll(p => p >= periodLength)
+  end
+  
+  
+---
+id:@p:sentientSites:r:26556e7a-83553e37 "bpBoilersInFault"
+name:bpBoilersInFault
+func
+mod:2020-11-18T17:04:52.029Z
+pod1
+src:
+  (boiler, dates) => do
+    // Are any boilers in fault?
+    // equip query: equip and boiler
+    // point query: point and fault
+  
+    faultSensor: readAll(point and fault and equipRef==toRecId(boiler)).first
+    
+    if (faultSensor == null or isEmpty(faultSensor)) return null
+      
+    return faultSensor.hisRead(dates).hisFindPeriods(status => status == true)
+  end
+  
+---
+id:@p:sentientSites:r:265586a6-0c61a79e "bpBoilersOperatingUnevenly"
+name:bpBoilersOperatingUnevenly
+func
+mod:2020-05-21T17:19:55.986Z
+src:
+  (boiler, dates, maxOperationLength) => do
+    // Are the boilers cycling operation evenly (i.e., one boiler hasn't been on
+    // for too long)?
+    // equip query: equip and boiler
+    // point query: point and run
+  
+    boilerStatus: readAll(point and run and equipRef==toRecId(boiler))
+    
+    if (boilerStatus == null or isEmpty(boilerStatus)) return null
+      
+    resultGrid: boilerStatus
+                .hisRead(dates)
+                .hisFindPeriods(status => status == true)
+                .hisFindAll(p => p >= maxOperationLength)
+    
+    return resultGrid
+  end
+  
+---
+id:@p:sentientSites:r:265975ba-6df7405e "bpBoilerTempTooLow"
+name:bpBoilerTempTooLow
+func
+mod:2020-11-18T17:11:34.348Z
+pod1
+src:
+  (boiler, dates, lowTemp, periodLength) => do
+    // Is the boiler temperature too low, for a specified amount of time?
+    // equip query: equip and boiler
+    // point query: point and hot and water and temp
+  
+    boilerSensor: readAll(point and hot and water and temp and equipRef==toRecId(boiler)).first
+    
+    if (boilerSensor == null) return null
+      
+    resultGrid: boilerSensor
+                .hisRead(dates)
+                .hisFindPeriods(temp => temp < lowTemp)
+                .hisFindAll(p => p >= periodLength)
+    
+    return resultGrid
+  end
+  
+---
+id:@p:sentientSites:r:2651a1c1-a9616d15 "bpBoosterPumpsShortcycling"
+name:bpBoosterPumpsShortcycling
+func
+mod:2020-05-18T14:03:06.972Z
+src:
+  (boosterPump, dates, minOffTime, minOnTime) => do
+    // Are the booster pumps short-cycling? This is determined using
+    // minimum off and on time acceptable.
+    // equip query: pump and water and domestic
+    // point query: domestic and water and pump and run
+  
+    sensor: readAll(point and domestic and water and pump and run and equipRef==toRecId(boosterPump)).first
+    
+    if (sensor == null or isEmpty(sensor)) return null
+      
+    return shortCycling(sensor, dates, minOffTime, minOnTime)
+  end
+  
+  
+---
+id:@p:sentientSites:r:26629cb9-f3a8d570 "bpBurnerControllerSafetyTriggered"
+name:bpBurnerControllerSafetyTriggered
+func
+mod:2020-11-18T17:10:39.89Z
+pod1
+src:
+  (boiler, dates) => do
+    // Is the burner controller safety triggered (i.e, if safety is ON 
+    // for any amount of time)?
+    // equip query: equip and boiler
+    // point query: point and flame and fault
+    
+    failContact: readAll(point and flame and fault and equipRef==toRecId(boiler)).first
+    
+    if (failContact == null or isEmpty(failContact)) return null
+      
+    resultGrid: failContact
+                .hisRead(dates)
+                .hisFindPeriods(status => status == true)
+    
+    return resultGrid
+  end
+  
+---
+id:@p:sentientSites:r:263608a8-0068662b "bpChillerTempTooHigh"
+name:bpChillerTempTooHigh
+func
+mod:2020-05-06T18:04:34.292Z
+src:
+  (chiller, dates, chwHighTemp, oaHighTemp, periodLength) => do
+    // Is the supply chilled water temperature too high, given OA temp?
+    // equip query: equip and chiller
+    // point query: point and chilled and water and loop and supply and temp
+  
+    chwTempSensors: readAll(point and chilled and water and loop and supply and temp and equipRef==toRecId(chiller))
+  
+    if (isEmpty(chwTempSensors)) return null
+  
+    listSensorGrids: []
+    
+    chwTempSensors.each rec => do
+      listSensorGrids = listSensorGrids.add(
+        rec
+        .hisRead(dates)
+        .hisFindPeriods(temp => temp > chwHighTemp)
+        .hisFindAll(p => p >= periodLength)
+      )
+    end
+    
+    chwGrid: hisPeriodUnion(listSensorGrids)
+    oaGrid: bpFindWeatherData(chiller, dates).hisFindPeriods(temp => temp > oaHighTemp)
+    
+    if (oaGrid == null) return null
+  
+    // combine both temp records to find full fault grid
+    return hisPeriodIntersection([chwGrid, oaGrid]).hisFindAll(p => p >= periodLength)
+  end
+  
+---
+id:@p:sentientSites:r:263602b7-c149f41a "bpChillerTempTooLow"
+name:bpChillerTempTooLow
+func
+mod:2020-05-06T18:04:54.27Z
+src:
+  (chiller, dates, lowTemp, periodLength) => do
+    // is CHW supply temp too low for a period of time?
+    // equip tags are equip chiller
+    // point tags are point chilled water loop supply temp
+  
+    chwTempSensors: readAll(point and chilled and water and loop and supply and temp and equipRef==toRecId(chiller))
+  
+    if (isEmpty(chwTempSensors)) return null
+    
+    listSensorGrids: []
+    
+    chwTempSensors.each rec => do
+      listSensorGrids = listSensorGrids.add(
+        rec
+        .hisRead(dates)
+        .hisFindPeriods(temp => temp < lowTemp)
+        .hisFindAll(p => p >= periodLength))
+    end
+  
+    return hisPeriodUnion(listSensorGrids)
+  end
+  
+---
+id:@p:sentientSites:r:25cef4b3-4e4af3d5 "bpClintonHillImportV1"
+name:bpClintonHillImportV1
+func
+mod:2022-03-23T20:10:57.135Z
+src:
+  // Clinton Hill json import script
+  // ssRegion is the SkySpark region and dbName is the db project
+  // requires clinton as a marker on region
+  // raw data is coming in as °C and needs to be converted to °F
+  // this will correct any prior history:
+  //   readAll(point and siteRef==@p:sentientSites:r:25793cf3-d24ba613).toRecList.each r => hisRewrite(r) (val, ts) => [ts, val.as("°C").to("°F")]
+  (ssRegion:"clintonHillNorth", dbProject:"radiator-labs") => do
+      /*
+      // debug
+      uri: `https://api-neurohub.sentientbuildings.com/neurohub-db/export/trend-data`
+      method: "GET"
+      headers: {
+        "X-API-KEY": "7H5kNuQ6ZD2W62uzVVIDFaHUJFA4MoXq7qS3OuXM",
+        "id": "4860000",
+        "dataProvider": "radiator-labs",
+        "equipType": "temperatures",
+        "site": "",
+        "filter": "",
+        "limit": "30"
+      }
+      body: null
+      return dcHttp(uri,headers,body,method).ioReadJson({safeNames})
+   */
+   
+    // globals
+    point: null
+    row: null
+    lastWrite: null
+    postDate: null
+    lastSyncPoint: null
+    lastSync: null
+    exceptList: ""
+    writeList: []
+    sites: []
+    apts: []
+    site: null
+    floor: null
+    unit: null
+    newval: null   
+  
+    // grab the last sync point from the region record
+    region: read(parseFilter("region and " + ssRegion), false)
+    
+    // verify region record found
+    if (region == null) 
+      return "Error: Region " + ssRegion + " not found"
+    else do
+    
+      // process thermostat data
+      //------------------------
+      // grab last sync point, sync point is last record id
+      lastSyncPoint = region["lastSyncPoint"]
+      if (lastSyncPoint == null)
+        lastSyncPoint = "0"
+   
+      // grab json from input connector where newer than last sync point
+      uri: `https://api-neurohub.sentientbuildings.com/neurohub-db/export/trend-data`
+      method: "GET"
+      headers: {
+        "X-API-KEY": "7H5kNuQ6ZD2W62uzVVIDFaHUJFA4MoXq7qS3OuXM",
+        "id": lastSyncPoint.toStr(),
+        "dataProvider": "radiator-labs",
+        "equipType": "temperatures",
+        "site": "",
+        "filter": "",
+        "limit": "30"
+      }
+      body: null
+      data: dcHttp(uri,headers,body,method).ioReadJson({safeNames})
+  
+      // leave is no data
+      if (data.isDict())
+        return data
+        
+      // process data
+      // data row [{dataContent:[{...}],id=n},...]
+      data.each x => do
+  
+        // see if data packet available
+        if (x.has("dataContent")) do
+        
+          // process json point values
+          x->dataContent.each r => do
+  
+            // clinton hill uses values for names, so need to grab col names (values) for parsing rather than standard index
+            // safeNames converts columns to v165ClintonAvenue_North, v2B
+            // [ {"165 Clinton Avenue - North":{"2B":{"temperature":"no_data","time":"no_time"}},"1H":{"temperature":26.003333333333334,"time":"2019-11-25T04:24:03.821387Z"},
+  
+            // grab site column names
+            sites = r.toGrid().colNames()
+  
+            // for each site
+            sites.each s => do
+  
+              // grab site record - requires safeName as marker on site 
+              site = read(parseFilter("site and " + s), false)
+  
+              // only process sites found
+              if (site != null) do
+  
+                // grab list of apt column names
+                apts = r[s].toGrid().colNames()
+  
+                // for each apt
+                apts.each a => do
+  
+                  // if no data, ignore
+                  if (r[s][a]->temperature != "no_data") do
+  
+                    // determine floor and unit
+                    if (a.size > 3) do
+                      floor = a[1..2]
+                      unit = a[3..-1]
+                    end
+                    else do
+                      floor = a[1..1]
+                      unit = a[2..-1]
+                    end
+  
+                    // find temperature point
+                    point = read(parseFilter("point and temp and siteRef==@" + site->id + " and floorRef->navName==\"Floor-" + floor  + "\" and tenantRef->navName==\"Apt-" + floor + unit + "\""), false)
+  
+                    // if not found, try to create
+                    /*
+                    if (point == null) do
+                      sbClintonHillCreate(s + "-" + a)
+                      point = read(parseFilter("point and temp and siteRef==@" + site->id + " and floorRef->dis==\"Floor " + floor  + "\" and tenantRef->dis==\"Apt " + floor + "-" + unit + "\""), false)
+                    end
+                    */
+                    
+                    // if point found, add history
+                    if (point != null) do
+  
+                      lastWrite = point["hisEnd"]
+                      postDate = parseDateTime(r[s][a]->time[0..18], pattern: "YYYY-MM-DDThh:mm:SS","GMT").toTimeZone("New_York")
+  
+                      // if no history yet, seed with postDate
+                      if (lastWrite == null) lastWrite = (postDate - 1hr)
+  
+                      // only write history if timestamp > point hisEnd
+                      if (postDate > lastWrite) do
+                        // data is coming in as °C - change to °F
+                        newval = try r[s][a]->temperature.as("°C").to("°F") catch 0
+                        //writeList = writeList.add([a + "," + postDate + "," + newval]) 
+                        hisWrite({ts:postDate, val:newval},point)
+                      end
+  
+                    end
+                    // else add point to exception list
+                    else
+                      exceptList = exceptList + "rl, " + s + "-" + a + "," + floor + "," + unit + "\n" 
+  
+                  end
+  
+                end // apt
+  
+              end // site check
+              else
+                exceptList = exceptList + "rl, " + s + "\n"
+  
+            end // site
+  
+          end // row
+          
+        end // value check
+        
+        // track database row for sync
+        lastSync = x->id
+  
+      end // data rows
+      
+      // if files processed, then update last sync point
+      if (lastSync != null)
+        diff(region,{"lastSyncPoint":lastSync}).commit
+  
+    end
+  
+    // log exceptions
+    if (exceptList.size > 0) do
+      exceptList = "BP Clinton Hill Exceptions - " + now() + "\n" + exceptList
+      //ioWriteStr(exceptList + "\n", ioAppend(`io/bpClintonLog.txt`))
+    end
+  
+  
+  end
+---
+id:@p:sentientSites:r:26516b94-d2269b28 "bpCombustionAirFansNotWorking"
+name:bpCombustionAirFansNotWorking
+func
+mod:2020-05-26T20:03:40.69Z
+src:
+  (boiler, dates) => do
+    // Are the combustion air fans (CAFs) not working as expected? (i.e., CAF on ALARM status).
+    // equip query: equip and boiler
+    // point query: domestic and water and pump and run
+    // point query CAF: inducer and alarm
+  
+    // find the CAFs associated with the boiler 
+    cafSensors: readAll(point and inducer and alarm and equipRef==toRecId(boiler))
+    
+    listSensorGrids: []
+    times(cafSensors.size) x => do
+      listSensorGrids = listSensorGrids.add(
+       cafSensors[x]
+         .hisRead(dates)
+         .hisFindPeriods(sensorStatus => sensorStatus == true) // true is the equivalent to alarm for CAFs
+      )
+    end
+  
+    return hisPeriodUnion(listSensorGrids)
+  end
+  
+---
+id:@p:sentientSites:r:262b3a31-975853c2 "bpCondensateReturnTempTooHigh"
+name:bpCondensateReturnTempTooHigh
+func
+mod:2020-12-17T22:10:59.926Z
+pod2
+src:
+  (condensateEquip, dates, highTemp, periodLength) => do
+    // Is the condensate return temperature greater than a specific threshold (highTemp)?
+    // equip query: equip and condensate
+    // point query: point and loop and condensate
+  
+    condensateTempSensors: readAll(loop and condensate and equipRef==toRecId(condensateEquip))
+  
+    if (isEmpty(condensateTempSensors)) return null
+  
+    listSensorGrids: []
+    times(condensateTempSensors.size) x => do
+      listSensorGrids = listSensorGrids.add(
+       condensateTempSensors[x]
+         .hisRead(dates)
+         .hisFindPeriods(temp => temp > highTemp)
+         .hisFindAll(p => p >= periodLength)
+      )
+    end
+  
+    return hisPeriodUnion(listSensorGrids)
+  end
+  
+---
+id:@p:sentientSites:r:25cef4cc-06c7d02c "bpContourImportV1"
+name:bpContourImportV1
+func
+mod:2021-11-17T13:52:54.095Z
+src:
+  // LeFrac Contour json import script
+  // ssRegion is the SkySpark region and dbName is the db project
+  (ssRegion:"contour", dbProject:"h2o") => do
+  
+  /*
+      uri: `https://api-neurohub.sentientbuildings.com/neurohub-db/export/trend-data`
+      method: "GET"
+      headers: {
+        "X-API-KEY": "7H5kNuQ6ZD2W62uzVVIDFaHUJFA4MoXq7qS3OuXM",
+        "id": "1449525",
+        "dataProvider": "h2o",
+        "equipType": "thermostat",
+        "site": "",
+        "filter": "Contour",
+        "limit": "10"
+      }
+      body: null
+      return dcHttp(uri,headers,body,method)
+  */
+  
+    // globals
+    point: null
+    row: null
+    lastWrite: null
+    postDate: null
+    lastFile: null
+    files: null
+    lastSyncPoint: null
+    lastTSync: null
+    lastWSync: null
+    exceptList: ""
+    writeList: []
+    a: ""
+  
+    // grab the last sync point from the region record
+    region: read(parseFilter("region and " + ssRegion), false)
+    
+    // verify region record found
+    if (region == null) 
+      return "Error: Region " + ssRegion + " not found"
+    else do
+    
+      // process thermostat data
+      //------------------------
+      
+      // grab last sync point
+      lastSyncPoint = region["lastTSyncPoint"]
+      if (lastSyncPoint == null)
+        lastSyncPoint = "0";
+      
+      // grab H2O json from Neuro Hub API where newer than last sync point
+      // data format: id, portfolio, equipType, dataContent, dataTime, site
+      // Neuro Hub Prod
+      uri: `https://api-neurohub.sentientbuildings.com/neurohub-db/export/trend-data`
+      method: "GET"
+      headers: {
+        "X-API-KEY": "7H5kNuQ6ZD2W62uzVVIDFaHUJFA4MoXq7qS3OuXM",
+        "id": lastSyncPoint.toStr(),
+        "dataProvider": "h2o",
+        "equipType": "thermostat",
+        "site": "",
+        "filter": "Contour",
+        "limit": "200"
+      }
+      body: null
+      /*
+      uri: `https://api-neurohub.sentientbuildings.com/neurohub-db/export`
+      method: "GET"
+      headers: {"Content-Type": "text/plain", "X-API-KEY": "7H5kNuQ6ZD2W62uzVVIDFaHUJFA4MoXq7qS3OuXM"}
+      body: "{\"id\":\"" + lastSyncPoint + "\",\"dataProvider\":\"h2o\",\"equipType\":\"thermostat\",\"site\":\"\",\"filter\":\"Contour\",\"limit\":\"100\"}"
+      */
+      data: dcHttp(uri,headers,body,method).ioReadJson({safeNames})
+  
+      // process data
+      // data row [{dataContent:[{...}],id=n},...]
+      
+      data.each x => do
+        
+        try
+          // see if data packet available
+          if (x.has("dataContent")) do
+  
+            // process json point values
+            x->dataContent.each r => do
+  
+              // ensure json has required property
+              if (r.has("header")) do
+  
+                // find point based on equip serial number
+                point = read(point and temp and equipRef->partnerId==r->header->serial_number, false)
+  
+                // if point found, add history
+                if (point != null) do
+  
+                  lastWrite = point["hisEnd"]
+                  postDate = parseDateTime(r->header->timestamp, pattern: "YYYY-MM-DD hh:mm:SS")
+  
+                  // if no history yet, seed with postDate
+                  if (lastWrite == null) lastWrite = (postDate - 1hr)
+  
+                  // only write history if timestamp > point hisEnd
+                  if (postDate > lastWrite) do
+                    writeList = writeList.add([r->header->serial_number,postDate,r->payload->current_temperature_f])
+                    hisWrite({ts:postDate, val:r->payload->current_temperature_f},point)
+                  end
+                end
+                // else add point to exception list
+                else
+                  exceptList = exceptList + "h2ot, " + r->header->serial_number + ", " + r->header->location_assignment->building_name + "-" + r->header->location_assignment->apartment + "\n"
+              end
+  
+            end // row
+  
+            // track last sync record
+            lastTSync = x->id
+          
+          end // value check
+  
+        catch(e) do
+          // API errors include: Server Error, No Records
+          ioWriteStr("t:" + x + "\n" + data + "\n", ioAppend(`io/bpContourLog.txt`))
+        end
+  
+      end // data rows
+  
+      // process water meter data
+      // -------------------------
+      
+      // grab last sync point
+      lastSyncPoint = region["lastWSyncPoint"]
+      if (lastSyncPoint == null)
+        lastSyncPoint = "0";
+      
+      // grab json from input connector where newer than last sync point
+      headers = {
+        "X-API-KEY": "7H5kNuQ6ZD2W62uzVVIDFaHUJFA4MoXq7qS3OuXM",
+        "id": lastSyncPoint.toStr(),
+        "dataProvider": "h2o",
+        "equipType": "water-meter",
+        "site": "",
+        "filter": "Contour",
+        "limit": "20"
+      }
+      /*
+      body = "{\"id\":\"" + lastSyncPoint + "\",\"dataProvider\":\"h2o\",\"equipType\":\"water-meter\",\"site\":\"\",\"filter\":\"Contour\",\"limit\":\"200\"}"
+      */
+      data = dcHttp(uri,headers,body,method).ioReadJson({safeNames})
+  
+      // process data
+      // data row [{dataContent:[{...}],id=n},...]
+      data.each x => do
+      
+        try
+  
+          // see if data packet available
+          if (x.has("dataContent")) do
+  
+            // process json point values
+            x->dataContent.each r => do
+  
+              // ensure json has required property
+              if (r.has("header")) do
+  
+                // find point based on equip serial number
+                point = read(point and energy and equipRef->partnerId==r->header->serial_number, false)
+  
+                // if point found, add history
+                if (point != null) do
+  
+                  lastWrite = point["hisEnd"]
+                  postDate = parseDateTime(r->header->timestamp, pattern: "YYYY-MM-DD hh:mm:SS")
+  
+                  // if no history yet, seed with postDate
+                  if (lastWrite == null) lastWrite = (postDate - 1hr)
+  
+                  // only write history if timestamp > point hisEnd
+                  if (postDate > lastWrite) do
+                    writeList = writeList.add([r->header->serial_number,postDate,r->payload->gallons])
+                    hisWrite({ts:postDate, val:r->payload->gallons},point)
+                  end
+  
+                end
+                // else add point to exception list
+                else
+                  exceptList = exceptList + "h2ow, " + r->header->serial_number + ", " + r->header->location_assignment->building_name + "-" + r->header->location_assignment->apartment + "\n"
+  
+              end
+  
+            end // row
+            // track last file name
+            lastWSync = x->id
+  
+          end // value check
+  
+        catch(e) do
+          // API errors include: Server Error, No Records
+          ioWriteStr("w:" + x + "\n" + data + "\n", ioAppend(`io/bpContourLog.txt`))
+        end
+  
+      end // data rows
+      
+      // if data processed, then update last sync point
+      if (lastTSync != null and lastWSync != null)
+        diff(region,{"lastTSyncPoint":lastTSync,"lastWSyncPoint":lastWSync}).commit
+      else if (lastTSync != null)
+        diff(region,{"lastTSyncPoint":lastTSync}).commit
+      else if (lastWSync != null)
+        diff(region,{"lastWSyncPoint":lastWSync}).commit
+  
+    end
+  
+    // log exceptions
+    if (exceptList.size > 0) do
+      exceptList = "BP Contour Exceptions - " + now() + "\n" + exceptList
+      ioWriteStr(exceptList + "\n", ioAppend(`io/bpContourLog.txt`))
+    end
+  
+  end
+  
+  
+  
+---
+id:@p:sentientSites:r:264486c6-cce1cf45 "bpDhwSupplyTempTooHigh"
+name:bpDhwSupplyTempTooHigh
+func
+mod:2020-11-18T16:59:12.139Z
+pod1
+src:
+  (loopDhw, dates, highTemp, periodLength) => do
+    // is DHW supply temp too high for a period of time?
+    // equip tags are equip dhw loop
+    // point tags are point dhw loop supply temp
+  
+    dhwTempSensors: readAll(dhw and supply and not tank and not valve and equipRef==toRecId(loopDhw))
+  
+    if (isEmpty(dhwTempSensors)) return null
+    
+    listSensorGrids: []
+    
+    times(dhwTempSensors.size) x => do
+      listSensorGrids = listSensorGrids.add(
+        dhwTempSensors[x]
+          .hisRead(dates)
+          .hisFindPeriods(temp => temp > highTemp)
+          .hisFindAll(p => p >= periodLength))
+    end  
+  
+    return hisPeriodUnion(listSensorGrids)
+  end
+  
+---
+id:@p:sentientSites:r:264486ee-eec647de "bpDhwSupplyTempTooLow"
+name:bpDhwSupplyTempTooLow
+func
+mod:2020-11-18T17:00:45.993Z
+pod1
+src:
+  (loopDhw, dates, lowTemp, periodLength) => do
+    // is DHW supply temp too low for a period of time?
+    // equip tags are equip dhw loop
+    // point tags are point dhw loop supply temp
+  
+    dhwTempSensors: readAll(dhw and supply and not tank and not valve and equipRef==toRecId(loopDhw))
+  
+    if (isEmpty(dhwTempSensors)) return null
+    
+    listSensorGrids: []
+    
+    times(dhwTempSensors.size) x => do
+      listSensorGrids = listSensorGrids.add(
+        dhwTempSensors[x]
+        .hisRead(dates)
+        .hisFindPeriods(temp => temp < lowTemp)
+        .hisFindAll(p => p >= periodLength))
+    end
+  
+    return hisPeriodUnion(listSensorGrids)
+  end
+  
+---
+id:@p:sentientSites:r:264db7f0-fc8316a7 "bpDomesticWaterPumpsNotWorking"
+name:bpDomesticWaterPumpsNotWorking
+func
+mod:2020-12-17T22:10:59.926Z
+pod2
+src:
+  (dwPump, dates, periodLength) => do
+    // Have no domestic water pumps run in the last 6 hours?
+    // equip query: pump and water and domestic and cold
+    // point query: domestic and water and pump and run
+  
+    // find all pumps at the property
+    currentSiteRef: read(equipRef==toRecId(dwPump))["siteRef"]
+    pumpEquips: readAll(equip and pump and water and domestic and cold and siteRef==toRecId(currentSiteRef))
+  
+    // find the time frame when each pump at site is off
+    listSensorGrids: []
+    pumpEquips.each equip => do
+    
+      // for each pump at the property, look to find its status point
+      sensor: readAll(point and domestic and water and pump and run and equipRef==toRecId(equip)).first
+      if (isEmpty(sensor)) return null
+      
+      listSensorGrids = listSensorGrids.add(sensor.hisRead(dates).hisFindPeriods(status => status == false))
+    end
+    
+    allSensors: hisPeriodIntersection(listSensorGrids)
+    return allSensors.hisFindAll(p => p >= periodLength)
+  end
+  
+---
+id:@p:sentientSites:r:26506b31-fae091b2 "bpDomesticWaterPumpsWorkingTooMuch"
+name:bpDomesticWaterPumpsWorkingTooMuch
+func
+mod:2020-12-17T22:10:59.926Z
+pod2
+src:
+  (dwPump, dates, periodLength) => do
+    // Has a domestic water pump been running longer than expected?
+    // equip query: pump and water and domestic and cold
+    // point query: domestic and water and pump and run
+  
+    sensor: readAll(point and domestic and water and pump and cold and run and equipRef==toRecId(dwPump)).first
+    
+    if (isEmpty(sensor)) return null
+      
+    onGrid: sensor.hisRead(dates).hisFindPeriods(status => status == true)
+    return onGrid.hisFindAll(p => p >= periodLength)
+  end
+  
+---
+id:@p:sentientSites:r:2639fd63-3fb358a3 "bpFindWeatherData"
+name:bpFindWeatherData
+func
+mod:2020-05-01T15:31:39.199Z
+src:
+  (equip, dates) => do
+    // Gets weather data from appropriate equip if available
+    // If it is not available it uses the weather station's data
+    currentSiteRef: read(equip)["siteRef"]
+    oaGrid: [].toGrid
+    
+    // find point on current equip for outdoor air temp
+    oaTempSensorEquip: readAll(point and outdoor and air and temp and equipRef==toRecId(equip)).first
+    
+    if (oaTempSensorEquip != null) do
+      // use equip temp sensor if we have it
+      oaGrid = oaTempSensorEquip.hisRead(dates)
+    
+    else do
+      // find outdoor air temp from weather app 
+      oaTempSensorWeather: read(weatherRef and temp and weatherRef->id==currentSiteRef->weatherRef)
+      
+      // return null if we can't find oaTemp on either equip or weather app
+      if (oaTempSensorWeather == null) return null
+      
+      oaGrid = oaTempSensorWeather.hisRead(dates)
+    end
+    
+    return oaGrid
+  end
+  
+  
+---
+id:@p:sentientSites:r:2659a5ea-a43f3942 "bpHeatingSystemLosingMoreWaterThanUsual"
+name:bpHeatingSystemLosingMoreWaterThanUsual
+func
+mod:2020-12-17T22:10:59.926Z
+pod2
+src:
+  (meter, dates, percentDiffFromAverage, rollUpInterval) => do
+    // Is the heating system losing more water than it has historically?
+    // equip query: equip and meter and water and makeup
+    // point query: point and energy and hisTotalized
+  
+    meterUsage: readAll(point and energy and hisTotalized and equipRef==toRecId(meter)).first
+    
+    if (meterUsage == null or isEmpty(meterUsage)) return null
+      
+    // roll-up usages for each period, specified by rollUpInterval (e.g., 1day)
+    rolledUpUsage: hisRollup(meterUsage.hisRead(dates), sum, rollUpInterval)
+    
+    // find the average usage for the meter for the last year, then find the value to compare against
+    averageUsage: foldCol(meterUsage.hisRead(lastYear), "v0", mean)
+    highUsage: averageUsage * (1 + percentDiffFromAverage)   // percentDiffFromAverage should be decimal (e.g., 0.20)
+    
+    // return a hisGrid where usages exceed historical expectations
+    return rolledUpUsage.hisFindPeriods(usage => usage > highUsage)
+  end
+  
+---
+id:@p:sentientSites:r:26598895-aa48fea3 "bpHeatingSystemLosingWater"
+name:bpHeatingSystemLosingWater
+func
+mod:2020-12-17T22:10:59.926Z
+pod2
+src:
+  (meter, dates, maxUsage, rollUpInterval) => do
+    // Is the heating system losing too much water?
+    // equip query: equip and meter and water and makeup
+    // point query: point and energy and hisTotalized
+  
+    meterUsage: readAll(point and energy and hisTotalized and equipRef==toRecId(meter)).first
+    
+    if (meterUsage == null or isEmpty(meterUsage)) return null
+      
+    // roll-up usages for each period, specified by rollUpInterval (e.g., 1day)
+    rolledUpUsage: hisRollup(meterUsage.hisRead(dates), sum, rollUpInterval)
+    
+    // return a hisGrid where usages exceed expectations (e.g., 100gal)
+    return rolledUpUsage.hisFindPeriods(usage => usage > maxUsage)
+  end
+  
+---
+id:@p:sentientSites:r:2655a82b-d9668834 "bpHhwPumpOnAndHotOutside"
+name:bpHhwPumpOnAndHotOutside
+func
+mod:2020-11-18T17:03:36.971Z
+pod1
+src:
+  (hhwPump, dates, oaHighTemp, periodLength) => do
+    // Is the HHW circulation pump on when it is hot outside?
+    // equip query: equip and pump and hot and water and not domestic TODO: replace "and not domestic" with affirmative tag when added to nueroLib
+    // point query: point and hot and water and pump and run
+  
+    hhwSensor: read(point and hot and water and pump and run and equipRef==toRecId(hhwPump), false)
+  
+    if (hhwSensor == null) return null
+  
+    hhwSensorOn: hhwSensor
+                 .hisRead(dates)
+                 .hisFindPeriods(status => status) // find all time the pump was on
+  
+    oaGrid: bpFindWeatherData(hhwPump, dates).hisFindPeriods(temp => temp > oaHighTemp)
+    
+    if (oaGrid == null) return null
+  
+    // combine both temp records to find full fault grid
+    return hisPeriodIntersection([hhwSensorOn, oaGrid]).hisFindAll(p => p >= periodLength)
+  end
+  
+---
+id:@p:sentientSites:r:2662cf07-322b2ca5 "bpHhwPumpsOffAndColdOutside"
+name:bpHhwPumpsOffAndColdOutside
+func
+mod:2020-11-18T17:03:49.229Z
+pod1
+src:
+  (hhwPumpSet, dates, oaLowTemp, periodLength) => do
+    // Are both(or all) the HHW circulation pumps off when it is cold outside?
+    // equip query: equip and pump and hot and water and not domestic TODO: figure out an affirmitive tag to switch 'not domestic' out with
+    // point query: point and hot and water and pump and run
+  
+    pumpStatusSensors: readAll(point and hot and water and pump and run and equipRef==toRecId(hhwPumpSet)) // get all pumps in 1 set
+  
+    // return null if there is not more than 1 point on this equip
+    if (pumpStatusSensors.size < 2) return null
+    
+    numPumpsRunningGrid: pumpStatusSensors
+                        .hisRead(dates)
+                        .hisMap(v=>if(v) 1 else 0)  // map all boolean values to 1 for truthy and 0 for falsy
+                        .hisFoldCols(sum)  // add them up into 1 column
+                        .hisFindPeriods(count => count == 0)  // any time all pumps are off
+                        .hisFindAll(p => p >= periodLength)
+    
+    oaGrid: bpFindWeatherData(hhwPumpSet, dates).hisFindPeriods(temp => temp < oaLowTemp)
+    
+    if (oaGrid == null) return null
+  
+    return hisPeriodIntersection([numPumpsRunningGrid, oaGrid]).hisFindAll(p => p >= periodLength)
+    
+  end
+  
+---
+id:@p:sentientSites:r:2662cd27-de010914 "bpHhwPumpsRunningParallel"
+name:bpHhwPumpsRunningParallel
+func
+mod:2020-11-18T17:04:19.282Z
+pod1
+src:
+  (hhwPumpSet, dates, periodLength) => do
+    // Are HHW pumps in a set running at the same time?
+    // NOTE: use this rule specifically for HHW pumps (notice equip and point queries), for ALL pumps use bpPumpsRunningParallel func
+    // equip query: equip and pump and hot and water and not domestic TODO: replace "and not domestic" with affirmative tag when added to nueroLib
+    // point query: point and hot and water and pump and run
+  
+    pumpStatusSensors: readAll(point and hot and water and pump and run and equipRef==toRecId(hhwPumpSet)) // get all pumps in 1 set
+  
+    // return null if there is not more than 1 point on this equip
+    if (pumpStatusSensors.size < 2) return null
+  
+    numPumpsRunningGrid: pumpStatusSensors
+                        .hisRead(dates)
+                        .hisMap(v=>if(v) 1 else 0)  // map all boolean values to 1 for truthy and 0 for falsy
+                        .hisFoldCols(sum)  // add them up into 1 column
+                        .hisFindPeriods(count => count > 1)  // any time more than 1 pump is running
+                        .hisFindAll(p => p >= periodLength)
+  
+    return numPumpsRunningGrid
+  
+  end
+  
+---
+id:@p:sentientSites:r:2644911e-776366a5 "bpHwSupplyTempTooHigh"
+name:bpHwSupplyTempTooHigh
+func
+mod:2020-05-05T21:03:46.619Z
+src:
+  (loopHw, dates, highTemp, periodLength) => do
+    // Is hot water supply temp too high, given highTemp and periodLength?
+    // equip query: equip and loop and hot and water
+    // point query: point and hot and water and loop and not differential and not dhw
+  
+    hwTempSensors: readAll(hot and water and loop and not differential and not dhw and equipRef==toRecId(loopHw))
+  
+    if (isEmpty(hwTempSensors)) return null
+    
+    listSensorGrids: []
+    times(hwTempSensors.size) x => do
+      listSensorGrids = listSensorGrids.add(
+        hwTempSensors[x]
+          .hisRead(dates)
+          .hisFindPeriods(temp => temp > highTemp)
+          .hisFindAll(p => p >= periodLength)
+      )
+    end  
+  
+    return hisPeriodUnion(listSensorGrids)
+  end
+  
+---
+id:@p:sentientSites:r:26449154-865d5f25 "bpHwSupplyTempTooLow"
+name:bpHwSupplyTempTooLow
+func
+mod:2020-11-18T17:01:39.455Z
+pod1
+src:
+  (loopHw, dates, hwLowTemp, oaLowTemp, periodLength) => do
+    // Are outdoor temp (oaTemp) and hot water supply temp (hwLowTemp) both below a given level?
+    // equip query: equip and loop and hot and water and not dhw
+    // point query: point and hot and water and loop and not differential and not dhw
+  
+    // get temperature sensor information into single fault grid
+    hwTempSensors: readAll(hot and water and loop and not differential and not dhw and equipRef==toRecId(loopHw))
+  
+    if (isEmpty(hwTempSensors)) return null
+  
+    listSensorGrids: []
+    times(hwTempSensors.size) x => do
+      listSensorGrids = listSensorGrids.add(
+        hwTempSensors[x]
+          .hisRead(dates)
+          .hisFindPeriods(temp => temp < hwLowTemp)
+          .hisFindAll(p => p >= periodLength)
+      )
+    end
+    
+    hwGrid: hisPeriodUnion(listSensorGrids)
+    if (isEmpty(hwGrid)) return null
+  
+    // find outdoor air temperature record 
+    oaGrid: bpFindWeatherData(loopHw, dates).hisFindPeriods(temp => temp < oaLowTemp)
+  
+    // combine both temp records to find full fault grid
+    return hisPeriodIntersection([hwGrid, oaGrid]).hisFindAll(p => p >= periodLength)
+  end
+  
+---
+id:@p:sentientSites:r:262c443c-06da7d6f "bpInventoryRevert"
+name:bpInventoryRevert
+func
+mod:2020-04-17T10:49:57.675Z
+src:
+  // update BP object names and tags based on the controlling inventory worksheet, tagged bpInventoryUpdate
+  // target is control column value to process ("update" by default)
+  (target:"update") => do
+  
+    // globals
+    tags:  {}
+    point: null
+    rec:   null
+    x:     ""
+    
+    // grab points csv
+    // csv cols: pointId,control,regionNameAdj,siteNameAdj,floorNameAdj,tenantNameAdj,equipNameAdj,pointNameAdj,siteTagAdj,equipTagAdj,pointTagAdj
+    csv: read(file and bpInventoryRevert).ioReadCsv({safeNames})
+    
+    if (csv == null)
+      return "Error: CSV not found"
+    else do
+    
+      // process each point row
+      csv.toRecList.each r => do
+      
+        if (r["control"] != null and r["control"] == target) do
+        
+          // read points as required
+          point = read(parseFilter("id==" + r["pointId"].split(" ")[0]),false)
+          if (point != null) do
+            
+            // region update?
+            if (r["regionNameAdj"] != null and r["regionNameAdj"] != "") do
+              rec = readById(point->regionRef,false)
+              if (rec != null) do
+                diff(rec,{dis:r["regionName"]}).commit
+              end
+            end
+  
+            // site update?
+            tags = {}
+            if (r["siteNameAdj"] != null and r["siteNameAdj"] != "") do
+              tags = tags.set("dis", r["siteName"])
+            end
+            if (r["siteTagAdj"] != null and r["siteTagAdj"] != "") do
+              r["siteTagAdj"].split(",").each tag => if (reFind(r"-",tag) != null) tags = tags.set(tag[1..-1], marker()) else tags = tags.set(tag, removeMarker())
+            end
+            if (not isEmpty(tags)) do
+              rec = readById(point->siteRef,false)
+              if (rec != null)
+                x = x
+                diff(rec,tags).commit
+            end
+  
+            // floor update?
+            if (r["floorNameAdj"] != null and r["floorNameAdj"] != "") do
+              rec = readById(point->floorRef,false)
+              if (rec != null) do
+                diff(rec,{navName:r["floorName"]}).commit
+              end
+            end
+  
+            // tenant update?
+            if (r["tenantNameAdj"] != null and r["tenantNameAdj"] != "") do
+              rec = readById(point->tenantRef,false)
+              if (rec != null) do
+                diff(rec,{navName:r["tenantName"]}).commit
+              end
+            end
+            
+            // equip update?
+            tags = {}
+            if (r["equipNameAdj"] != null and r["equipNameAdj"] != "") do
+              tags = tags.set("navName", r["equipName"])
+            end
+            if (r["equipTagAdj"] != null and r["equipTagAdj"] != "") do
+              r["equipTagAdj"].split(",").each tag => if (reFind(r"-",tag) != null) tags = tags.set(tag[1..-1], marker()) else tags = tags.set(tag, removeMarker())
+            end
+            if (not isEmpty(tags)) do
+              rec = readById(point->equipRef,false)
+              if (rec != null)
+                x = x
+                diff(rec,tags).commit
+            end
+  
+            // point update?
+            tags = {}
+            if (r["pointNameAdj"] != null and r["pointNameAdj"] != "") do
+              tags = tags.set("navName", r["pointName"])
+            end
+            if (r["pointTagAdj"] != null and r["pointTagAdj"] != "") do
+              r["pointTagAdj"].split(",").each tag => if (reFind(r"-",tag) != null) tags = tags.set(tag[1..-1], marker()) else tags = tags.set(tag, removeMarker())
+            end
+            if (not isEmpty(tags)) do
+                x = x
+                diff(point,tags).commit
+            end
+            
+          end // point check
+        
+        end // control check
+  
+      end // csv loop
+      
+    end // csv open
+  
+    return now()
+    
+  end
+  
+  
+---
+id:@p:sentientSites:r:26289961-72baf8ad "bpInventoryUpdate"
+name:bpInventoryUpdate
+func
+mod:2020-04-21T16:44:19.721Z
+src:
+  // update BP object names and tags based on the controlling inventory worksheet, tagged bpInventoryUpdate
+  // target is control column value to process ("update" by default)
+  (target:"update") => do
+  
+    // globals
+    tags:  {}
+    point: null
+    rec:   null
+    x:     ""
+    
+    // grab points csv
+    // csv cols: pointId,control,regionNameAdj,siteNameAdj,floorNameAdj,tenantNameAdj,equipNameAdj,pointNameAdj,siteTagAdj,equipTagAdj,pointTagAdj
+    csv: read(file and bpInventoryUpdate).ioReadCsv({safeNames})
+    
+    if (csv == null)
+      return "Error: CSV not found"
+    else do
+    
+      // process each point row
+      csv.toRecList.each r => do
+      
+        if (r["control"] != null and r["control"] == target) do
+        
+          // read points as required
+          point = read(parseFilter("id==" + r["pointId"].split(" ")[0]),false)
+          if (point != null) do
+            
+            // region update?
+            if (r["regionNameAdj"] != null and r["regionNameAdj"] != "") do
+              rec = readById(point->regionRef,false)
+              if (rec != null) do
+                diff(rec,{dis:r["regionNameAdj"]}).commit
+              end
+            end
+  
+            // site update?
+            tags = {}
+            if (r["siteNameAdj"] != null and r["siteNameAdj"] != "") do
+              tags = tags.set("dis", r["siteNameAdj"])
+            end
+            if (r["siteTagAdj"] != null and r["siteTagAdj"] != "") do
+              r["siteTagAdj"].split(",").each tag => if (reFind(r"-",tag) != null) tags = tags.set(tag[1..-1], removeMarker()) else tags = tags.set(tag, marker())
+            end
+            if (not isEmpty(tags)) do
+              rec = readById(point->siteRef,false)
+              if (rec != null)
+                x = x
+                diff(rec,tags).commit
+            end
+  
+            // floor update?
+            if (r["floorNameAdj"] != null and r["floorNameAdj"] != "") do
+              rec = readById(point->floorRef,false)
+              if (rec != null) do
+                diff(rec,{navName:r["floorNameAdj"]}).commit
+              end
+            end
+  
+            // tenant update?
+            if (r["tenantNameAdj"] != null and r["tenantNameAdj"] != "") do
+              rec = readById(point->tenantRef,false)
+              if (rec != null) do
+                diff(rec,{navName:r["tenantNameAdj"]}).commit
+              end
+            end
+            
+            // equip update?
+            tags = {}
+            if (r["equipNameAdj"] != null and r["equipNameAdj"] != "") do
+              tags = tags.set("navName", r["equipNameAdj"])
+            end
+            if (r.has("equipPhysicalNameAdj"))
+              if (r["equipPhysicalNameAdj"] != null and r["equipPhysicalNameAdj"] != "") do
+                tags = tags.set("equipPhysicalName", r["equipPhysicalNameAdj"])
+              end
+            if (r.has("equipProxyName"))
+              if (r["equipProxyName"] != null and r["equipProxyName"] != "") do
+                tags = tags.set("equipProxyName", r["equipProxyName"])
+              end
+            if (r["equipTagAdj"] != null and r["equipTagAdj"] != "") do
+              r["equipTagAdj"].split(",").each tag => if (reFind(r"-",tag) != null) tags = tags.set(tag[1..-1], removeMarker()) else tags = tags.set(tag, marker())
+            end
+            if (not isEmpty(tags)) do
+              rec = readById(point->equipRef,false)
+              if (rec != null)
+                x = x
+                diff(rec,tags).commit
+            end
+  
+            // point update?
+            tags = {}
+            if (r["pointNameAdj"] != null and r["pointNameAdj"] != "") do
+              tags = tags.set("navName", r["pointNameAdj"])
+            end
+            if (r["pointTagAdj"] != null and r["pointTagAdj"] != "") do
+              r["pointTagAdj"].split(",").each tag => if (reFind(r"-",tag) != null) tags = tags.set(tag[1..-1], removeMarker()) else tags = tags.set(tag, marker())
+            end
+            if (not isEmpty(tags)) do
+                x = x
+                diff(point,tags).commit
+            end
+            
+          end // point check
+        
+        end // control check
+  
+      end // csv loop
+      
+    end // csv open
+  
+    return now()
+    
+  end
+  
+---
+id:@p:sentientSites:r:262b3577-a818c103 "bpOaTempSensorsFailed"
+name:bpOaTempSensorsFailed
+func
+mod:2020-11-18T17:02:55.381Z
+pod1
+src:
+  (oaSensor, dates, lowTemp, highTemp, periodLength) => do
+    // Is the OA temperature sensor failing (outside range bracketed
+    // by lowTemp and highTemp)?
+    // equip query: equip and temp and sensor
+    // point query: point and outdoor and air and temp
+  
+    oaTempSensors: readAll(outdoor and air and temp and equipRef==toRecId(oaSensor))
+  
+    if (isEmpty(oaTempSensors)) return null
+  
+    listSensorGrids: []
+    times(oaTempSensors.size) x => do
+      listSensorGrids = listSensorGrids.add(
+       oaTempSensors[x]
+         .hisRead(dates)
+         .hisFindPeriods(temp => (temp > highTemp or temp < lowTemp))
+         .hisFindAll(p => p >= periodLength)
+      )
+    end
+  
+    return hisPeriodUnion(listSensorGrids)
+  end
+  
+---
+id:@p:sentientSites:r:2685591f-064858b8 "bpPumpRuntime"
+name:bpPumpRuntime
+func
+mod:2020-07-01T14:20:48.969Z
+src:
+  (site, dates) => do
+  
+    pumpStatuses: readAll(point and pump and run and siteRef==site->id)
+    
+    if (pumpStatuses.isEmpty()) return null
+    listSensorGrids: []
+    
+    
+     pumpStatuses.each rec => do
+      listSensorGrids = listSensorGrids.add(
+        rec
+        .hisRead(dates)
+        .hisFindPeriods(val => val == true)
+        .foldCol("v0", sum))
+    end
+    
+    runtime: listSensorGrids.foldCol("v0",sum)
+    
+   // good above 
+   
+    if (runtime == null or runtime == na()) runtime = 0hr
+    
+    else {sum: runtime}
+    
+  end
+---
+id:@p:sentientSites:r:264c75d3-9cacd0fc "bpPumpsRunningParallel"
+name:bpPumpsRunningParallel
+func
+mod:2020-11-18T17:03:18.545Z
+pod1
+src:
+  (pumpSet, dates, periodLength) => do
+    // Are pumps in a set running at the same time? 
+    // NOTE: This func encompasses ALL types of pumps in a set (DHW pumps, HHW pumps CW pumps.. etc). 
+    // NOTE cont: Notice the equip and point queries. For HHW pumps specifically use bpHhwPumpsRunningParallel
+    // equip query: equip and pump
+    // point query: point and pump and run
+  
+    pumpStatusSensors: readAll(point and pump and run and equipRef==toRecId(pumpSet)) // get all pumps in 1 set
+  
+    // return null if there is not more than 1 point on this equip
+    if (pumpStatusSensors.size < 2) return null
+  
+    numPumpsRunningGrid: pumpStatusSensors
+                        .hisRead(dates)
+                        .hisMap(v=>if(v) 1 else 0)  // map all boolean values to 1 for truthy and 0 for falsy
+                        .hisFoldCols(sum)  // add them up into 1 column
+                        .hisFindPeriods(count => count > 1)  // any time more than 1 pump is running
+                        .hisFindAll(p => p >= periodLength)
+  
+    return numPumpsRunningGrid
+  
+  end
+  
+---
+id:@p:sentientSites:r:264d8151-82b7f03e "bpReturnHotWaterTempTooLow"
+name:bpReturnHotWaterTempTooLow
+func
+mod:2020-11-18T17:03:08.342Z
+pod1
+src:
+  (loopHw, dates, hwLowTemp, oaLowTemp, periodLength) => do
+    // Is the return hot water temperature too low, given OA temp?
+    // equip query: equip and loop and hot and water
+    // point query: point and loop and hot and water and not dhw and not supply and not differential
+  
+    // get temperature sensor information into single fault grid
+    hwTempSensors: readAll(loop and hot and water and not dhw and not supply and not differential and equipRef==toRecId(loopHw))
+  
+    if (isEmpty(hwTempSensors)) return null
+  
+    listSensorGrids: []
+    times(hwTempSensors.size) x => do
+      listSensorGrids = listSensorGrids.add(
+        hwTempSensors[x]
+          .hisRead(dates)
+          .hisFindPeriods(temp => temp < hwLowTemp)
+          .hisFindAll(p => p >= periodLength)
+      )
+    end
+    
+    hwGrid: hisPeriodUnion(listSensorGrids)
+    if (isEmpty(hwGrid)) return null
+  
+    // find outdoor air temperature record 
+    oaGrid: bpFindWeatherData(loopHw, dates).hisFindPeriods(temp => temp < oaLowTemp)
+  
+    // combine both temp records to find full fault grid
+    return hisPeriodIntersection([hwGrid, oaGrid]).hisFindAll(p => p >= periodLength)
+  end
+  
+---
+id:@p:sentientSites:r:2645b07a-9e3dfccd "bpTempDiff"
+name:bpTempDiff
+func
+mod:2020-05-06T17:31:41.855Z
+src:
+  /*
+    Temperature differential between two points, return
+    history grid of 'point1 - point2'.
+  */
+  (point1, point2, dates) => do
+    hisRead([point1, point2], dates).hisInterpolate.map row => do
+      {ts: row->ts, v0: row["v0"] - row["v1"] } // r["v0"] is point1 and r["v1"] is point2 (corresponding to order of hisRead)
+    end
+  
+  end
+  
+---
+id:@p:sentientSites:r:278f75fc-98b4f01d "bpTestFunc"
+name:bpTestFunc
+func
+mod:2021-01-13T19:57:07.594Z
+src:
+  () => do
+    "hello"
+  end
+---
+id:@p:sentientSites:r:27473211-9a6cd2f0 "calcTest"
+name:calcTest
+func
+mod:2020-11-18T01:19:41.168Z
+src:
+  (thePoint, dates, thresh: 10) => do
+    
+    // Run on any point
+    hisGrid: thePoint.hisRead(dates)
+    
+    // Clean up data
+    .findAll( row => row.has("v0") and row["v0"] != na() )
+      if (hisGrid.size < 2) return null
+       
+       // Get flips/h
+      .sfxHisDerivative
+      
+      // Find periods of too many flips
+      //.hisFindPeriods(x => abs(x) > thresh)
+  
+  end
+---
+id:@p:sentientSites:r:2639bcd1-b799d670 "CHW > 5°F above setpoint"
+name:bpChillerAboveSetpoint
+dis:"CHW > 5°F above setpoint"
+func
+mod:2020-12-17T22:10:59.926Z
+pod2
+ruleOn:equip and chiller
+ruleType:sparkRule
+src:
+  (chiller, dates, deltaHigh, periodLength) => do
+    // Is the supply chilled water temperature too high, given OA temp?
+    // equip query: equip and chiller
+    // point query for chilled water: point and chilled and water and loop and supply and temp
+    // point query for chiller setpoint: point and chilled and water and supply and temp and sp
+  
+    chwTempSensors: readAll(point and chilled and water and loop and supply and temp and equipRef==toRecId(chiller))
+    chwSetPoint: readAll(point and chilled and water and supply and temp and sp and equipRef==toRecId(chiller)).first
+  
+    // return null if there is no chilled water supply temp
+    if (chwTempSensors == null) return null
+    
+    if (chwSetPoint == null) do
+     // if there is no set point on the current chiller, look for one on any chiller at the site
+     currSiteRef: chiller["siteRef"]
+     chwSetPoint = readAll(point and chilled and water and supply and temp and sp and siteRef==currSiteRef).first
+    end
+    
+    // return null if we can't find a setpoint
+    if (chwSetPoint == null) return null
+    
+    
+    listSensorGrids: []
+    
+    chwTempSensors.each rec => do
+      
+      // calculates the difference between the temperature and the setpoint
+      diffGrid: bpTempDiff(rec, chwSetPoint, dates)
+          
+      listSensorGrids = listSensorGrids.add(
+        diffGrid
+        .hisFindPeriods(diff => diff > deltaHigh) // check if the difference is more than x degrees
+        .hisFindAll(p => p >= periodLength))
+    end
+  
+    return hisPeriodUnion(listSensorGrids)
+    
+  end
+  
+---
+id:@p:sentientSites:r:26d7fd92-4ce97a28 "CO2 Level Too High"
+name:bpCO2TooHigh
+dis:CO2 Level Too High
+func
+mod:2020-12-17T22:10:59.926Z
+pod2
+rachel
+ruleOn:equip and ahu
+sparkRule
+src:
+  (ahu, dates, highCo2, periodLength) => do
+  
+    // Is the CO2 Level Higher than 1000ppm?
+    // equip query: equip and ahu
+    // point query: point and co2
+    
+      // call points for each ahu
+      // do we want to include sensor? yes
+      co2Sensors: readAll(point and co2 and sensor and equipRef==toRecId(ahu))
+      
+      
+      //loop through every sensor and check if value is over 1000ppm
+      
+      listCo2Grids: []                     //initialize empty grid
+      co2Sensors.each s => do
+        listCo2Grids = listCo2Grids.add(   // reassign listCo2Grids with values from each point - add values to empty array to current value
+        s                                  // get record of 1 sensor 
+          .hisRead(dates)                  // read the history of values on the sensor
+          .hisFindPeriods(ppm => ppm > highCo2)   // find the time periods when the ppm is > 1000ppm
+          .hisFindAll(p => p >= periodLength)     // find when rule meets periodLength parameter criteria
+         )
+      end
+      
+      return hisPeriodUnion(listCo2Grids)
+  end
+        
+---
+id:@p:sentientSites:r:266cf29e-60a98ad0 "contourRemoveDups"
+name:contourRemoveDups
+func
+mod:2020-06-05T12:13:34.112Z
+src:
+  // one time function to merge duplicate histories and remove duplicate entries
+  // run as a job: jobRun(contourRemoveDups())
+  () => do
+  
+    // globals
+    oldId: null
+    oldPoint: null
+    newPoint: null
+    usePoint: null
+    dropPoint: null
+    tenant: null
+    newHis: null
+    useUnit: ""
+    
+    // process equips based on partnerId
+    readAll(equip and partnerId and regionRef->contour).keepCols(["id","navName","partnerId","tenantRef"]).sort("partnerId").each r => do
+    
+      // see if dup, otherwise save for next check
+      if (r->partnerId != oldId) do
+        oldId = r->partnerId
+        oldPoint = read(point and equipRef->id==r->id, false)
+      end
+      else do
+        newPoint = read(point and equipRef->id==r->id, false)
+        if (oldPoint != null and newPoint != null) do
+          // grab merged history
+          newHis = try hisRead([oldPoint,newPoint],2019-10-01..now(),{limit:null}).hisFoldCols(max) catch []
+          tenant = try read(id==r->tenantRef->id) catch null
+          if (not isEmpty(newHis) and tenant != null) do
+            // determine which point to save (the save tenant name is "Apt 10-7" arather than "Apt 7")
+            if (r->tenantRef->dis.contains("-")) do
+              usePoint = newPoint
+              dropPoint = oldPoint
+            end
+            else do
+              usePoint = oldPoint
+              dropPoint = newPoint
+            end
+            useUnit = usePoint->unit
+            // prepare history (check for nulls and ensure units match)
+            newHis = newHis.map(h => if (h.has("v0")) if (h->v0 != null) {ts:h->ts,v0:h->v0.as(useUnit)})
+            // clear save point history
+            usePoint.hisClear(null)
+            // ensure complete
+            hisSync()
+            // write new history
+            hisWrite(newHis,usePoint)
+            // ensure complete
+            hisSync()
+            // now remove drop targets
+            dropPoint.hisClear(null)
+            // leave tenant to ensure all equips are processed
+            //diff(read(id==dropPoint->tenantRef->id),{},{remove}).commit
+            // drop equip
+            diff(read(id==dropPoint->equipRef->id),{},{remove}).commit
+            // drop point
+            diff(dropPoint,{},{remove}).commit
+          end
+        end
+      end
+      
+    end
+    return now()
+  end
+  
+  
+---
+id:@p:sentientSites:r:2707a95c-87662084 "DHW Supply Temp Average"
+name:bpDhwSupplyTempAvg
+dis:DHW Supply Temp Average
+func
+kpiRule
+mod:2020-11-18T18:14:42.497Z
+pod1
+ruleOn:site
+src:
+  (site, dates, minTemp, maxTemp) => do
+  
+    sensor: readAll(dhw and temp and sensor and supply and siteRef==site->id)
+  
+    temps: hisRead(sensor, dates)
+    .hisClip()
+    .hisFindAll(t => t > minTemp and t < maxTemp)
+    // Conditional statement to only include values inside valid data range
+   
+    // Average the values across each row to produce a single column of values
+    // Then average the single column of values, v0, into an average that returns one value
+    {avg: temps.hisFoldCols(avg).foldCol("v0",avg)}
+  end
+---
+id:@p:sentientSites:r:2707a95c-45208bfa "DHW Supply Temp Min and Max"
+name:bpDhwSupplyTempMinMax
+dis:DHW Supply Temp Min and Max
+func
+kpiRule
+mod:2020-11-18T18:14:50.387Z
+pod1
+ruleOn:site
+src:
+  (site, dates, minTemp, maxTemp) => do
+  
+    sensor: readAll(dhw and temp and sensor and supply and siteRef==site->id)
+  
+    temps: hisRead(sensor, dates)
+    .hisClip()
+    .hisFindAll(t => t > minTemp and t < maxTemp)
+    // Conditional statement to only include values inside valid data range
+  
+    {min: temps.hisFoldCols(min).foldCol("v0",min), max: temps.hisFoldCols(max).foldCol("v0",max)}
+  end
+---
+id:@p:sentientSites:r:276b908a-55239fc0 "findRegionAndSiteForTargetRef"
+name:findRegionAndSiteForTargetRef
+func
+mod:2020-12-17T16:24:48.891Z
+pod1
+src:
+  // DO NOT DELETE - this func is necessary for the Smartsheet <> SkySpark integration
+  (equipId) => do
+    target: readLink(equipId)
+    
+    if (target== null) return null
+    
+    return {regionName: target["regionRef"], siteName: target["siteRef"]}
+  end
+---
+id:@p:sentientSites:r:2707a95b-ad62beae "Gas Consumption"
+name:bpKpiGas
+dis:Gas Consumption
+func
+kpiRule
+mod:2020-09-30T20:38:51.518Z
+ruleOn:site
+src:
+  (site, dates) => do
+  //read gas meter point
+    pt: read(gas and equipRef->siteMeter and siteRef==site->id, false)
+    if (pt == null) return null
+  
+  //read into historical data grid(table)
+    his: hisRead(pt, dates).hisClip()
+  
+  //return average daily consumption
+    kpiAvg: his.foldCol("v0", avg)
+    if (na() == kpiAvg) null else {avg: kpiAvg}
+  end
+---
+id:@p:sentientSites:r:25d461fe-49f9eb04 "gitExport"
+name:gitExport
+func
+mod:2022-05-26T14:55:23.404Z
+src:
+  // grab project trio for export to git
+  () => do
+  
+    source: ""
+    temp: ""
+    
+    // get list of all projects
+    projs().each p => do
+      // for each project, get rec type individually, and sorted by id, to ensure consistency for git
+      // must write to trio format in xquery, otherwise locally you get zinc
+      // xquery returns list type, so just reference first entry to get as string
+      source = xq().xqProjs([p->id.toStr().replace("p:","")]).xqEval("readAll(projMeta).ioWriteTrio(\"\")").xqExecute().first
+      source = source + "---\n" + xq().xqProjs([p->id.toStr().replace("p:","")]).xqEval("readAll(navMeta).ioWriteTrio(\"\")").xqExecute().first
+      temp = xq().xqProjs([p->id.toStr().replace("p:","")]).xqEval("if (readCount(conn) > 0) readAll(conn).sort(\"id\").ioWriteTrio(\"\") else \"\"").xqExecute().first
+      if (temp.size > 0)
+        source = source + "---\n" + temp
+      temp = xq().xqProjs([p->id.toStr().replace("p:","")]).xqEval("if (readCount(func) > 0) readAll(func).sort(\"id\").ioWriteTrio(\"\") else \"\"").xqExecute().first
+      if (temp.size > 0)
+        source = source + "---\n" + temp
+      temp = xq().xqProjs([p->id.toStr().replace("p:","")]).xqEval("if (readCount(rule) > 0) readAll(rule).sort(\"id\").ioWriteTrio(\"\") else \"\"").xqExecute().first
+      if (temp.size > 0)
+        source = source + "---\n" + temp
+      temp = xq().xqProjs([p->id.toStr().replace("p:","")]).xqEval("if (readCount(job) > 0) readAll(job).sort(\"id\").ioWriteTrio(\"\") else \"\"").xqExecute().first
+      if (temp.size > 0)
+        source = source + "---\n" + temp
+      temp = xq().xqProjs([p->id.toStr().replace("p:","")]).xqEval("if (readCount(view) > 0) readAll(view).sort(\"id\").ioWriteTrio(\"\") else \"\"").xqExecute().first
+      if (temp.size > 0)
+        source = source + "---\n" + temp
+      // write to io so can send as attachment
+      source.ioWriteStr(`io/temp.trio`)
+      // and send
+      emailSend(["jkotiadis@sentientbuildings.net"],"BP Backup: " + p->dis,"attachment",`io/temp.trio`)
+    end
+    return source.size()
+  
+  end
+  
+  
+---
+id:@p:sentientSites:r:280b4f5b-b7100d80 "haystackAssign"
+name:haystackAssign
+func
+mod:2021-05-21T20:22:34.781Z
+src:
+  () => do
+    readAll(point and not weatherPoint and not haystackCur and tStarId and newDHW).each p => do
+      h: p->tStarId
+      diff(p, {haystackCur:h, haystackHis:h}).commit
+    end
+  end
+---
+id:@p:sentientSites:r:280b480a-209e11fa "importPoints"
+name:importPoints
+func
+mod:2021-04-15T19:24:01.803Z
+src:
+  () => do
+    src: read(haystackConn and clinton1).haystackReadAll(point and inovonicsConnRef)
+    // Rename
+    grid: src.renameCol("id","tStarId")
+    //grid = grid.renameCol("regionRef","rr").renameCol("siteRef","sr").renameCol("floorRef","fr").renameCol("tenantRef","tr").renameCol("equipRef","er")
+    // Map
+    grid = grid.map row => row.set("tStarId", row->tStarId.toStr)
+    // Add
+    //grid = grid.addCol("regionRef", row => try readAll(region and tStarId).find(r => r->tStarId == row->rr.toStr)->id catch null)
+    //grid = grid.addCol("siteRef", row => try readAll(site and tStarId).find(s => s->tStarId == row->sr.toStr)->id catch null)
+    // If Mutli Site
+    /*
+    grid = grid.addCol("regionRef", row => read(region and dis=="The Ashland")->id)
+    grid = grid.addCol("siteRef", row => read(site and dis=="300 Ashland")->id)
+    grid = grid.addCol("floorRef", row => try readAll(floor and tStarId).find(f => f->tStarId == row->fr.toStr)->id catch null)
+    grid = grid.addCol("tenantRef", row => try readAll(tenant and tStarId).find(t => t->tStarId == row->tr.toStr)->id catch null)
+    grid = grid.addCol("equipRef", row => try readAll(equip and tStarId).find(e => e->tStarId == row->er.toStr)->id catch null)
+    */
+    // Remove
+    grid = grid.removeCols(["mod","curVal","curStatus","curErr","curConvert","hisStart","hisEnd","hisErr","hisEndVal","hisSize","hisStatus","hisId","hisCollectInterval","hisCollectCov","inovonicsConnRef","inovonicsCur","writeStatus","writeLevel","writeErr"])
+    // Commit
+    grid.each row => commit(diff(null, row, {add}))
+  end
+---
+id:@p:sentientSites:r:2710c1d8-d0ee0f8e "Instant Email Alert"
+name:bpEmailAlertInstant
+dis:Instant Email Alert
+func
+mod:2020-12-30T20:56:18.546Z
+src:
+  // Send out email if a rule condition sparks for a certain duration  
+  () => do
+   
+    equips: readAll(equip) //Fetch the appropriate records
+   
+    //Sparks are recommended to be run on equips but yes this can be changed as per user interest
+    equips.each e => do  
+      sparksTriggered: e.ruleSparks(toSpan(now() - 24hour..now()), readAll(rule and emailAlertInstant)) //add the appropriate tag
+                        .ruleSparkHis 
+  
+      emailRecipients: try e->siteRef->emailRecipients catch null // contains list of emails (try catch added by sentient 12/30/2020)
+       
+      if (sparksTriggered.size > 0 and emailRecipients.size!=null ) do
+        
+        //Gather the details of which spark has triggered the previous email that was sent.
+        //In Line 28 we write the details onto the equip record as a transient tag
+        lastEmailSentDetails:try e->lastInstantEmailTriggeredBy catch null
+  
+        //If it is not the same, send out an email to the email recepients else ignore
+        if(lastEmailSentDetails==null or lastEmailSentDetails!=sparksTriggered.sortr("ts").first->ts) do
+          startEmailText: "<html><p>Hi there,<br /><br />A high alert spark has been identified. Please see the link below or contact your Energy Engineer at Bright Power.</p>"
+  
+          rulesTriggeredList: sparksTriggered.cols.map c => (c.meta.dis)
+    
+          rulesTriggeredText: "<ul>"
+          rulesTriggeredList.remove(0).each r => do  // remove the first entry which is always the "Timestamp" col      
+            rulesTriggeredText = rulesTriggeredText + "<li>" + r + "</li>"
+          end
+  
+          url: "https://brightpower-skyspark.sentientsite.com" + uiLink({view:"sparkSwivel", state:{targets:[toRecId(e)]}})
+          link: "<a href='" + url + "'>View in SkySpark.</a>"
+          
+          emailHtml: startEmailText + rulesTriggeredText + "</li></ul>" + link + "</html>"
+          emailSend(emailRecipients, "Critical Spark Alert", emailHtml)
+          
+          // After email is sent, record the details as a transient tag on the equip
+          commit(diff(e,{lastInstantEmailTriggeredBy:sparksTriggered.sortr("ts").first->ts,lastInstantEmailSentAt: now()},{transient}))
+  
+        end
+  
+      end
+  
+    end
+     
+  end
+  
+---
+id:@p:sentientSites:r:27b82785-c7e41a82 "jFunc"
+name:jFunc
+func
+mod:2021-03-15T15:45:34.396Z
+src:
+  () => do
+    readAll(floor and not navName).each t => do
+      r: t->dis
+      diff(t, {navName:r, -dis}).commit
+    end
+  end
+---
+id:@p:sentientSites:r:2707a95d-2355aa69 "KPI-Pump"
+name:bpKpiPump
+dis:KPI-Pump
+func
+kpiRule
+mod:2020-10-26T19:24:49.631Z
+ruleOn:pump
+src:
+  (site, dates) => do
+    pt: read(runtime and equipRef->pump and siteRef==site->id, false)
+    if (pt == null) return null
+  
+    his: hisRead(pt, dates).hisMap(v=>if(v) 1 else 0).hisClip()
+  
+    kpiSum: his.foldCol("v0", sum)
+    if (na() == kpiSum) null else {sum: kpiSum}
+  end
+---
+id:@p:sentientSites:r:266c0686-29fcba84 "kpiTempTest"
+name:kpiTempTest
+func
+mod:2020-06-04T19:22:58.991Z
+src:
+  (equip, dates) => do
+    // for demo purposes we just grab one random zone temp
+    aptSensor: readAll(zone and temp and sensor)
+    if (aptSensor == null) return null
+  
+    // get matching setpoint for equip
+    sp: read(zone and temp and sp)
+    if (sp == null) return null
+  
+    // get interpolated difference between sensor - sp for samples
+    deltas: hisRead([aptSensor, sp], dates)
+              .hisInterpolate
+              .map(r => r.set("delta", r["v0"] - r["v1"]))
+  
+    // return avg delta
+    kpiDelta: deltas.foldCol("delta", avg)
+    if (na() == kpiDelta) null else {delta: kpiDelta}
+  end
+  
+  
+---
+id:@p:sentientSites:r:2707a95c-156879b1 "kWh"
+name:bpKpiKwh
+dis:kWh
+func
+help:"Site electrical kWh consumption min, max, average over time period."
+kpiRule
+mod:2020-10-26T19:24:13.094Z
+ruleOn:site
+src:
+  (site, dates) => do
+    pt: read(energy and equipRef->siteMeter and siteRef==site->id, false)
+    if (pt == null) return null
+  
+    his: hisRead(pt, dates).hisClip()
+  
+    kpiSum: his.foldCol("v0", sum)
+    if (na() == kpiSum) null else {sum: kpiSum}
+  end
+---
+id:@p:sentientSites:r:2707a95d-88a10321 "Leak Detection"
+name:bpLeakDetection
+dis:Leak Detection
+doc:"This is a rule to detect leaks for a period of time."
+func
+mod:2020-11-18T17:12:24.39Z
+pod1
+ruleOn:leak
+sparkRule
+src:
+  (leak,dates,periodLength) => do
+  
+    // Is there a leak detected in the boiler plant?
+    // apply this rule on leak sensors
+  
+  
+    //Query for leak detectors
+    leakSensor: readAll(point and sensor and leak and equipRef==toRecId(leak))
+  
+    //return null if no leak detectors found
+    if (isEmpty(leakSensor)) return null
+  
+    listSensorGrids: []
+    //read dates within a timeframe where the leak detector is true
+    leakSensor.each rec => do
+      listSensorGrids = listSensorGrids.add(
+        rec
+       .hisRead(dates)
+       .hisFindPeriods(val => val == true)
+       .hisFindAll(p => p >= periodLength))
+    end
+  
+    return hisPeriodUnion(listSensorGrids)
+  end
+---
+id:@p:sentientSites:r:280b4f5e-1853e7f6 "newFunc"
+name:newFunc
+func
+mod:2021-04-15T19:24:15.255Z
+src:
+  () => do
+    "Hello world!"
+  end
+---
+id:@p:sentientSites:r:2725a315-699eb478 "oldAptTempTooHighAndPumpsRunningMichaelangelo"
+name:oldAptTempTooHighAndPumpsRunningMichaelangelo
+func
+mod:2020-11-13T21:44:14.313Z
+src:
+  (tempPoint, dates, highTemp, periodLength) => do
+    // needs to run on point and temp and zone 
+      
+    // Find space temperatures that are over high temp of 74
+    tempGrid: tempPoint
+              .hisRead(dates)
+              .hisFindPeriods(temp => temp > highTemp)
+              .hisFindAll(p => p > periodLength)
+    
+    if (tempGrid == null) return null 
+    
+    // Query to get pump set  
+    pumpSet: try (tempPoint->pumpRef) catch null
+    if (pumpSet == null) return null       
+    
+    pumps: readAll(equip and equipRef==(pumpSet))
+    if (pumps.isEmpty()) return null
+    
+    pumpRuntimesList: []
+      
+    pumps.each pump => do
+      pumpRuntimesList = pumpRuntimesList.add(pump.equipRuntimePeriods(dates))
+    end
+    
+    if (isEmpty(pumpRuntimesList)) return null
+    
+    // Union pump runtime grids and add 1 hour to total runtime
+    pumpRuntimeUnion: hisPeriodUnion(pumpRuntimesList).hisPeriodShift(0hr, 1hr)
+  
+    // Find periods when both pump is on and space temperature is over 74
+    return hisPeriodIntersection([tempGrid, pumpRuntimeUnion]).hisFindAll(p => p > periodLength)
+  end
+---
+id:@p:sentientSites:r:266299dc-803e72c4 "oldbpBoilerShortCycling"
+name:oldbpBoilerShortCycling
+func
+mod:2020-11-19T15:43:18.464Z
+src:
+  (boiler, dates, minOffTime, minOnTime) => do
+    // Are the boilers/burners short-cycling (i.e., turning on/off more than once 
+    // in a specified amount of time)?
+    // equip query: equip and boiler
+    // point query: point and run and not fault and not flame
+  
+    sensor: readAll(point and run and not fault and not flame and equipRef==toRecId(boiler)).first
+    
+    if (sensor == null or isEmpty(sensor)) return null
+      
+    return shortCycling(sensor, dates, minOffTime, minOnTime)
+  end
+  
+---
+id:@p:sentientSites:r:25b38519-ba044c36 "pointWatch"
+name:pointWatch
+func
+mod:2020-01-16T20:36:32.952Z
+src:
+  // This function creates a watch that will update the curVal and curStatus on each point within the watch.
+  
+  () => do
+    grid: readAll(point and haystackConnRef).watchOpen("brightPower")
+    watchId: grid.meta->watchId
+    watchClose(watchId)
+  end
+---
+id:@p:sentientSites:r:25d81107-f2672529 "rptEquipPointHisCsv"
+name:rptEquipPointHisCsv
+func
+mod:2020-02-24T23:28:49.818Z
+src:
+  // Author: Sentient Buildings LLC
+  // Copyright 2020 Sentient Buildings LLC. All Rights Reserved.
+  // create summary point history csv per equip per site
+  // takes quoted "tag" to control sites to report, but defaults to "dis", which is every site, and quoted "dates" for hisRead span but defaults to "thisWeek"
+  // dates can be "today" or a date span such as 2020-01-01..2020-01-31
+  // tag could be a tag like "stevenson" (to limit to a group), "dis" (everything) or a property like "dis==\"120 Claremont Ave\"" (one specific)
+  // while fast, for multi-site requests, probably should be run as a job using jobRun(rptEquipPointHisCsv("dis","today")) to allow enough time
+  (tag:"msm121", dates:"today") => do
+  
+    // globals...create a file name within ""
+    name: ""
+    p: []
+    
+    // get requested sites based on tag
+    readAll(parseFilter("site and " + tag)).each s => do
+  
+      // get equip per site
+      readAll(equip and siteRef==s->id)[0..1].each e => do
+          
+        // build custom file name of site_floor_equip
+        name = try s->dis + "_" + e->floorRef->navName + "_" + e->navName + "_" + format(now(),"YYYY-MM-DD_hh-mm-ss") catch ""
+        name = name.replace(" ","_")
+  
+        // create pdf based on existing view
+        if (not isEmpty(name)) do 
+          
+          // grab equip point list
+          p = readAll(point and equipRef==e->id)
+          
+          // create pdf
+          if (not isEmpty(p)) 
+            p.hisRead(toDateSpan(dates), {limit: null}).hisRollupAuto(15min).ioWriteCsv(parseUri("io/rptEquipPointHis/" + name + ".csv"))
+          
+        end
+        
+      end // equip
+    
+    end // site
+    
+    return "done"
+    
+  end
+---
+id:@p:sentientSites:r:25d717e0-30f96353 "rptEquipSum"
+name:rptEquipSum
+func
+mod:2020-02-24T23:28:58.709Z
+src:
+  // Author: Sentient Buildings LLC
+  // Copyright 2020 Sentient Buildings LLC. All Rights Reserved.
+  // create summary point report per equip per site
+  // takes quoted "tag" to control sites to report, but defaults to "dis", which is every site, and quoted "dates" for hisRead span but defaults to "thisWeek"
+  // dates can also be a date span such as 2020-01-01..2020-01-31
+  // tag could be a tag like "stevenson" (to limit to a group), "dis" (everything) or a property like "dis==\"120 Claremont Ave\"" (one specific)
+  // while fast, for multi-site requests, probably should be run as a job using jobRun(rptEquipSum("dis","today")) to allow enough time
+  (tag:"msm132", dates:"today") => do
+  
+    // globals
+    name: ""
+    p: []
+    
+    // get requested sites based on tag
+    readAll(parseFilter("site and " + tag)).each s => do
+  
+      // get equip per site
+      readAll(equip and siteRef==s->id)[0..1].each e => do
+          
+        // build custom file name of site_floor_equip
+        name = try s->dis + "_" + e->floorRef->navName + "_" + e->navName + "_" + format(now(),"YYYY-MM-DD_hh-mm-ss") catch ""
+        name = name.replace(" ","_")
+  
+        // create pdf based on existing view
+        if (not isEmpty(name)) do 
+          
+          // grab equip point list
+          p = readAll(point and equipRef==e->id)
+          
+          // create pdf
+          if (not isEmpty(p)) do
+            ioExport({view:"vwEquipSum",state:{span:toDateSpan(dates), points: p.toRecIdList}, pageSize:"8.5in,14in"},parseUri("io/rptEquipSum/" + name + ".pdf"))
+          end
+          
+        end
+        
+      end // equip
+    
+    end // site
+    
+    return "done"
+    
+  end
+---
+id:@p:sentientSites:r:25d71d35-6d0c6b4c "rptPointHisCsvFtp"
+name:rptPointHisCsvFtp
+func
+mod:2020-07-20T15:05:18.602Z
+src:
+  // Author: Sentient Buildings LLC
+  // Copyright 2020 Sentient Buildings LLC. All Rights Reserved.
+  // create point history csv per site
+  // takes quoted "tag" to control sites to report, but defaults to "dis", which is every site, and quoted "dates" for hisRead span but defaults to "thisWeek"
+  // dates can also be a date span such as 2020-01-01..2020-01-31
+  // tag could be a tag like "stevenson" (to limit to a group), "dis" (everything) or a property like "dis==\"120 Claremont Ave\"" (one specific)
+  // while fast, for multi-site requests, probably should be run as a job using jobRun(rptPointHisCsv("msm132","today")) to allow enough time
+  // this function generates a seperate csv for each data type (bool, number, str) and writes them to the sentient FTP server. 
+  (tag:"dis", dates:"today") => do
+  
+    // globals
+    name: ""
+    p: null
+    
+    // FTP Credentials
+    ftp: "ftp://transfer.sentientbuildings.com/"
+    passwordSet(ftp, "skyspark:cb6#hDGUI!fkdoEfR@")
+    
+    // get requested sites based on tag
+    readAll(parseFilter("site and " + tag)).each s => do
+        
+      // build custom file name of site_date_type
+      name = try s->dis + "_" + format(now(),"YYYY-MM-DD_hh-mm-ss") catch ""
+      name = name.replace(" ","_")
+  
+      // create csv history per type
+      if (not isEmpty(name)) do 
+      
+        p = readAll(point and siteRef == s->id and kind == "Bool")
+        if (p.size > 0)
+          p.hisRead(toDateSpan(dates), {limit: null}).hisRollupAuto(15min).ioWriteCsv(parseUri(ftp + "brightpower/Outbound/RTEM_Reports/" + name + "_bool.csv"))
+        p = readAll(point and siteRef == s->id and kind == "Number")
+        if (p.size > 0)
+          p.hisRead(toDateSpan(dates), {limit: null}).hisRollupAuto(15min).ioWriteCsv(parseUri(ftp + "brightpower/Outbound/RTEM_Reports/" + name + "_number.csv"))
+        p = readAll(point and siteRef == s->id and kind == "Str")
+        if (p.size > 0)
+          p.hisRead(toDateSpan(dates), {limit: null}).hisRollupAuto(15min).ioWriteCsv(parseUri(ftp + "brightpower/Outbound/RTEM_Reports/" + name + "_str.csv"))
+      
+      end
+  
+    end
+    
+    return "done"
+  
+  end
+  
+---
+id:@p:sentientSites:r:25e6d945-e1a2d8a5 "rptPointHisCsvOneOutput"
+name:rptPointHisCsvOneOutput
+func
+mod:2020-03-03T16:12:59.909Z
+src:
+  // Author: Sentient Buildings LLC
+  // Copyright 2020 Sentient Buildings LLC. All Rights Reserved.
+  // create point history csv per site
+  // takes quoted "tag" to control sites to report, but defaults to "dis", which is every site, and quoted "dates" for hisRead span but defaults to "thisWeek"
+  // dates can also be a date span such as 2020-01-01..2020-01-31
+  // tag could be a tag like "stevenson" (to limit to a group), "dis" (everything) or a property like "dis==\"120 Claremont Ave\"" (one specific)
+  // while fast, for multi-site requests, probably should be run as a job using jobRun(rptPointHisCsv("msm132","today")) to allow enough time
+  // this function generates a single csv for all data types (bool, number, str) and writes it to the io directory of the host machine on which it is run.
+  (tag:"dis", dates:"today") => do
+  
+    // globals
+    name: ""
+    p: null
+    
+    // get requested sites based on tag
+    readAll(parseFilter("site and " + tag)).each s => do
+        
+      // build custom file name of site_date_type
+      name = try s->dis + "_" + format(now(),"YYYY-MM-DD_hh-mm-ss") catch ""
+      name = name.replace(" ","_")
+  
+      // create csv history per type
+      if (not isEmpty(name)) do 
+      
+        p = readAll(point and siteRef == s->id)
+        if (p.size > 0)
+          p.hisRead(toDateSpan(dates), {limit: null}).hisRollupAuto(15min).ioWriteCsv(parseUri("io/rptPointHisOneOutput/" + name + "_combined.csv"))
+       
+      end
+  
+    end
+  
+    return "done"
+  
+  end
+---
+id:@p:sentientSites:r:25e96f63-f01c7895 "rptPointHisCsvOneOutputFtp"
+name:rptPointHisCsvOneOutputFtp
+func
+mod:2022-03-10T17:49:33.983Z
+pod1
+src:
+  // Author: Sentient Buildings LLC
+  // Copyright 2020 Sentient Buildings LLC. All Rights Reserved.
+  // create point history csv per site
+  // takes quoted "tag" to control sites to report, but defaults to "dis", which is every site, and quoted "dates" for hisRead span but defaults to "thisWeek"
+  // dates can also be a date span such as 2020-01-01..2020-01-31
+  // tag could be a tag like "stevenson" (to limit to a group), "dis" (everything) or a property like "dis==\"120 Claremont Ave\"" (one specific)
+  // while fast, for multi-site requests, probably should be run as a job using jobRun(rptPointHisCsv("msm132","today")) to allow enough time
+  // this function generates a single csv for all data types (bool, number, str) and writes it to the sentient FTP server. 
+  (tag:"dis", dates:"today") => do
+  
+    // globals
+    name: ""
+    p: null
+    
+    // FTP Credentials
+    ftp: "ftp://transfer.sentientbuildings.com/"
+    passwordSet(ftp, "skyspark:cb6#hDGUI!fkdoEfR@")
+      
+    // get requested sites based on tag
+    readAll(parseFilter("site and " + tag)).each s => do
+        
+      // build custom file name of site_date_type
+      name = try s->dis + "_" + dates.toStr() catch ""
+      name = name.replace(" ","_")
+      name = name.replace(",","_")
+  
+      // create csv history per type
+      try do
+        
+        if (not isEmpty(name)) do 
+  
+          p = readAll(point and siteRef == s->id)
+          if (p.size > 0)
+            p.hisRead(toDateSpan(dates), {limit: null}).hisRollupAuto(15min).ioWriteCsv(parseUri(ftp + "brightpower/Outbound/RTEM_Reports/" + name + "_combined.csv"))
+        end
+      
+      catch do
+        
+        if (not isEmpty(name)) do 
+  
+          p = readAll(point and not hisErr and siteRef == s->id)
+          if (p.size > 0)
+            p.hisRead(toDateSpan(dates), {limit: null}).hisRollupAuto(15min).ioWriteCsv(parseUri(ftp + "brightpower/Outbound/RTEM_Reports/" + name + "_combined.csv"))
+        end
+        
+      end
+  
+    end
+  
+    return "done"
+  
+  end
+  
+---
+id:@p:sentientSites:r:266c01ba-f34b3abb "rptPointHisCsvOneOutputRegionRef"
+name:rptPointHisCsvOneOutputRegionRef
+func
+mod:2020-07-20T15:05:31.53Z
+src:
+  // Author: Sentient Buildings LLC
+  // Copyright 2020 Sentient Buildings LLC. All Rights Reserved.
+  // create point history csv per site
+  // takes quoted "tag" to control sites to report, but defaults to "dis", which is every site, and quoted "dates" for hisRead span but defaults to "thisWeek"
+  // dates can also be a date span such as 2020-01-01..2020-01-31
+  // tag could be a tag like "stevenson" (to limit to a group), "dis" (everything) or a property like "dis==\"120 Claremont Ave\"" (one specific)
+  // while fast, for multi-site requests, probably should be run as a job using jobRun(rptPointHisCsv("msm132","today")) to allow enough time
+  // this function generates a single csv for all data types (bool, number, str) and writes it to the sentient FTP server. 
+  (regionRef, dates:"today") => do
+  
+    // globals
+    name: ""
+    p: null
+    
+    // FTP Credentials
+    ftp: "ftp://transfer.sentientbuildings.com/"
+    passwordSet(ftp, "skyspark:cb6#hDGUI!fkdoEfR@")
+    
+    // get requested sites based on tag
+    readAll(site and regionRef==toRecId(regionRef)).each s => do
+        
+      // build custom file name of site_date_type
+      name = try s->dis + "_" + dates.toStr() catch ""
+      name = name.replace(" ","_")
+      name = name.replace(",","_")
+  
+      // create csv history per type
+      try do
+        
+        if (not isEmpty(name)) do 
+  
+          p = readAll(point and siteRef == s->id)
+          if (p.size > 0)
+            p.hisRead(toDateSpan(dates), {limit: null}).hisRollupAuto(15min).ioWriteCsv(parseUri(ftp + "brightpower/Outbound/RTEM_Reports/" + name + "_combined.csv"))
+        end
+      
+      catch do
+        
+        if (not isEmpty(name)) do 
+  
+          p = readAll(point and not hisErr and siteRef == s->id)
+          if (p.size > 0)
+            p.hisRead(toDateSpan(dates), {limit: null}).hisRollupAuto(15min).ioWriteCsv(parseUri(ftp + "brightpower/Outbound/RTEM_Reports/" + name + "_combined.csv"))
+        end
+        
+      end
+  
+    end
+  
+    return "done"
+  
+  end
+  
+---
+id:@p:sentientSites:r:25e6e65c-c353a1c9 "rptTagReport"
+name:rptTagReport
+func
+mod:2020-05-19T19:18:11.723Z
+src:
+  // Author: Sentient Buildings LLC
+  // Copyright 2020 Sentient Buildings LLC. All Rights Reserved.
+  // create a grid of region/site/equip/point name and tag info
+  // best to run from folio so it can be easily exported as csv
+  // accepts site parameter of a tag or property=value, such as msm120 or dis==\"name\"
+  (tag:"dis") => do
+  
+    // globals
+    result: []
+    // for each site
+    readAll(parseFilter("site and " + tag)).sort("dis").each s => do
+      // for each equip
+      readAll(equip and siteRef==toRecId(s)).sort("navName").each e => do
+        // for each point
+        readAll(point and equipRef==toRecId(e)).sort("navName").each p => do
+          // add details to result grid
+          result = result.add({
+            regionName:s->regionRef->dis,
+            siteName:s->dis, 
+            floorName:if (e.has("floorRef")) try e->floorRef->navName catch try e->floorRef->dis catch "" else "",
+            tenantName:if (e.has("tenantRef")) try e->tenantRef->navName catch try e->tenantRef->dis catch "" else "",
+            equipName:e->navName,
+            pointName:p->navName,
+            siteTags:s.findAll(v => v == marker()).toStr(),
+            equipTags:e.findAll(v => v == marker()).toStr(),
+            pointTags:p.findAll(v => v == marker()).toStr(),
+            pointId:p->id
+          })
+        end
+      end
+    end
+    
+    //return results
+    return result.toGrid().reorderCols(["regionName","siteName","floorName","tenantName","equipName","pointName","siteTags","equipTags","pointTags","pointId"])
+    
+  end
+  
+---
+id:@p:sentientSites:r:2668e95d-3216105a "rptTagReport2"
+name:rptTagReport2
+func
+mod:2020-06-02T10:41:42.153Z
+src:
+  // Author: Sentient Buildings LLC
+  // Copyright 2020 Sentient Buildings LLC. All Rights Reserved.
+  // create a grid of region/site/equip/point name and tag info
+  // best to run from folio so it can be easily exported as csv
+  // accepts site parameter of a tag or property=value, such as msm120 or dis==\"name\"
+  // Note: this version interprets equip with no points as a system
+  (tag:"dis",addAdj:false) => do
+  
+    // globals
+    result: []
+    // for each site
+    readAll(parseFilter("site and " + tag)).sort("dis").each s => do
+      // for each equip
+      readAll(equip and siteRef==toRecId(s)).sort("navName").each e => do
+        // for each point
+        a: readAll(point and equipRef==toRecId(e)).sort("navName")
+        if (a.size == 0) do
+          if (addAdj) do
+            result = result.add({
+              regionName:s->regionRef->dis,
+              regionNameAdj:"",
+              siteName:s->dis, 
+              siteNameAdj:"",
+              floorName:if (e.has("floorRef")) try e->floorRef->navName catch try e->floorRef->dis catch "" else "",
+              floorNameAdj:"",
+              tenantName:if (e.has("tenantRef")) try e->tenantRef->navName catch try e->tenantRef->dis catch "" else "",
+              tenantNameAdj:"",
+              equipName:e->navName + " (System)",
+              equipNameAdj:"",
+              equipProxyName:"",
+              equipPhysicalName:"",
+              pointName:"",
+              pointNameAdj:"",
+              pointProxyName:"",
+              pointPhysicalName:"",
+              siteTags:s.findAll(v => v == marker()).toStr(),
+              siteTagAdj:"",
+              equipTags:e.findAll(v => v == marker()).toStr(),
+              equipTagAdj:"",
+              pointTags:"",
+              pointTagAdj:"",
+              control:"",
+              pointId:""
+            })
+          end
+          else do
+            result = result.add({
+              regionName:s->regionRef->dis,
+              siteName:s->dis, 
+              floorName:if (e.has("floorRef")) try e->floorRef->navName catch try e->floorRef->dis catch "" else "",
+              tenantName:if (e.has("tenantRef")) try e->tenantRef->navName catch try e->tenantRef->dis catch "" else "",
+              equipName:e->navName + " (System)",
+              pointName:"",
+              siteTags:s.findAll(v => v == marker()).toStr(),
+              equipTags:e.findAll(v => v == marker()).toStr(),
+              pointTags:"",
+              pointId:""
+            })
+          end
+        end
+        else do
+          a.each p => do
+            if (addAdj) do
+              result = result.add({
+                regionName:s->regionRef->dis,
+                regionNameAdj:"",
+                siteName:s->dis, 
+                siteNameAdj:"",
+                floorName:if (e.has("floorRef")) try e->floorRef->navName catch try e->floorRef->dis catch "" else "",
+                floorNameAdj:"",
+                tenantName:if (e.has("tenantRef")) try e->tenantRef->navName catch try e->tenantRef->dis catch "" else "",
+                tenantNameAdj:"",
+                equipName:e->navName,
+                equipNameAdj:"",
+                equipProxyName:"",
+                equipPhysicalName:"",
+                pointName:p->navName,
+                pointNameAdj:"",
+                pointProxyName:"",
+                pointPhysicalName:"",
+                siteTags:s.findAll(v => v == marker()).toStr(),
+                siteTagAdj:"",
+                equipTags:e.findAll(v => v == marker()).toStr(),
+                equipTagAdj:"",
+                pointTags:p.findAll(v => v == marker()).toStr(),
+                pointTagAdj:"",
+                control:"",
+                pointId:p->id
+              })
+            end
+            else do
+              result = result.add({
+                regionName:s->regionRef->dis,
+                siteName:s->dis, 
+                floorName:if (e.has("floorRef")) try e->floorRef->navName catch try e->floorRef->dis catch "" else "",
+                tenantName:if (e.has("tenantRef")) try e->tenantRef->navName catch try e->tenantRef->dis catch "" else "",
+                equipName:e->navName,
+                pointName:p->navName,
+                siteTags:s.findAll(v => v == marker()).toStr(),
+                equipTags:e.findAll(v => v == marker()).toStr(),
+                pointTags:p.findAll(v => v == marker()).toStr(),
+                pointId:p->id
+              })
+            end
+          end
+        end
+      end
+    end
+    
+    //return results
+    if (addAdj)
+      return result.toGrid().reorderCols(["regionName","regionNameAdj","siteName","siteNameAdj","floorName","floorNameAdj","tenantName","tenantNameAdj","equipName","equipNameAdj","equipProxyName","equipPhysicalName","pointName","pointNameAdj","pointProxyName","pointPhysicalName","siteTags","siteTagAdj","equipTags","equipTagAdj","pointTags","pointTagAdj","control","pointId"])
+    else
+      return result.toGrid().reorderCols(["regionName","siteName","floorName","tenantName","equipName","pointName","siteTags","equipTags","pointTags","pointId"])
+    
+  end
+  
+  
+  
+---
+id:@p:sentientSites:r:25d8785b-8220407f "ruleAHU001"
+name:ruleAHU001
+func
+mod:2020-02-21T16:42:57.147Z
+src:
+  // Author: Sentient Buildings LLC
+  // Copyright 2020 Sentient Buildings LLC. All Rights Reserved.
+  // rule AHU001 - AHU Overcooling space
+  // invoke: equip and ahu
+  // logic: Fan on, SA temp < SA setpoint by more than 5'F adj, for more than 5 min adj
+  (eq, dates, actDur: 30min, target: 5, sparkDur: 5min) => do
+  
+    // globals
+    faults:    [].toGrid
+    
+    // get points, including average supply temp
+    pFan:  read(point and fan and discharge and run and equipRef==toRecId(eq), false)
+    pSP:   read(point and temp and discharge and sp and equipRef==toRecId(eq), false)
+    pTemp: readAll(point and temp and discharge and not sp and equipRef==toRecId(eq))
+    
+    // proceed only if we have all the points
+    if (pFan != null and pSP != null and not isEmpty(pTemp)) do 
+      // get histories: v0:fan, v1:sp, v2:temp
+      pHist1: try hisRead([pFan, pSP],dates).hisInterpolate catch null
+      pHist2: try pTemp.hisRead(dates).hisInterpolate.hisFoldCols(avg) catch null
+      // join history grids, map rule into a T/F, find the periods of T that meet duration target
+      if (pHist1 != null and pHist2 != null) do
+        faults = hisJoin([pHist1, pHist2])
+          .map(r => {
+            ts: r->ts,
+            v0: if (r.has("v0") and r.has("v1") and r.has("v2")) do
+                   if (r->v0 and (r->v2 <= (r->v1 - target)))
+                     true
+                   else
+                     false
+                 end
+                 else
+                   false})
+          .hisFindPeriods(x => x)
+          .hisFindAll(p => p >= sparkDur)
+      end
+      
+    end
+    
+    return faults
+  
+  end
+  
+---
+id:@p:sentientSites:r:25d8786c-86a73a46 "ruleAHU002"
+name:ruleAHU002
+func
+mod:2020-02-21T16:43:03.71Z
+src:
+  // Author: Sentient Buildings LLC
+  // Copyright 2020 Sentient Buildings LLC. All Rights Reserved.
+  // rule AHU002 - AHU Overheating space
+  // invoke: equip and ahu
+  // logic: Fan on, SA temp > SA setpoint by more than 5'F adj, for more than 5 min adj
+  (eq, dates, actDur: 30min, target: 5, sparkDur: 5min) => do
+  
+    // globals
+    faults:    [].toGrid
+    
+    // get points, including average supply temp
+    pFan:  read(point and fan and discharge and run and equipRef==toRecId(eq), false)
+    pSP:   read(point and temp and discharge and sp and equipRef==toRecId(eq), false)
+    pTemp: readAll(point and temp and discharge and not sp and equipRef==toRecId(eq))
+    
+    // proceed only if we have all the points
+    if (pFan != null and pSP != null and not isEmpty(pTemp)) do 
+      // get histories: v0:fan, v1:sp, v2:temp
+      pHist1: try hisRead([pFan, pSP],dates).hisInterpolate catch null
+      pHist2: try pTemp.hisRead(dates).hisInterpolate.hisFoldCols(avg) catch null
+      // join history grids, map rule into a T/F, find the periods of T that meet duration target
+      if (pHist1 != null and pHist2 != null) do
+        faults = hisJoin([pHist1, pHist2])
+          .map(r => {
+            ts: r->ts,
+            v0: if (r.has("v0") and r.has("v1") and r.has("v2")) do
+                   if (r->v0 and (r->v2 >= (r->v1 + target)))
+                     true
+                   else
+                     false
+                 end
+                 else
+                   false})
+          .hisFindPeriods(x => x)
+          .hisFindAll(p => p >= sparkDur)
+      end
+      
+    end
+    
+    return faults
+  
+  end
+  
+---
+id:@p:sentientSites:r:25d8787f-e3b300b7 "ruleDHW002"
+name:ruleDHW002
+func
+mod:2020-02-21T16:43:09.298Z
+src:
+  // Author: Sentient Buildings LLC
+  // Copyright 2020 Sentient Buildings LLC. All Rights Reserved.
+  // rule DHW002 - DHW Unsafe temp
+  // invoke: equip and domestic and hot and water
+  // logic: DHW pump on and/or dhw flow (opt), DHW supply temp more than 135'F (adj)
+  (eq, dates, actDur: 30min, target: 135, sparkDur: 5min) => do
+  
+    // globals
+    pHist:  null
+    faults: [].toGrid
+    
+    // get points
+    pPump: read(point and run and equipRef->pump and equipRef->domestic and equipRef->hot and equipRef->water and tenantRef==eq->tenantRef, false)
+    pFlow: read(point and flow and equipRef->domestic and equipRef->hot and equipRef->water and tenantRef==eq->tenantRef, false)
+    pTemp: read(point and temp and supply and not sp and not run and equipRef==toRecId(eq), false)
+    
+    // proceed if temp, pump and flow are optional
+    if (pTemp != null) do 
+      // get histories, v0: temp, v1: pump status or flow
+      if (pPump != null)
+        pHist = hisRead([pTemp, pPump],dates).hisInterpolate
+      else if (pFlow != null)
+        pHist = hisRead([pTemp, pFlow],dates).hisInterpolate
+      else
+        pHist = pTemp.hisRead(dates).hisInterpolate
+      
+      // map rule into a T/F, find the periods of T that meet duration target
+      if (pHist != null) do
+        faults = pHist
+          .map(r => {
+            ts: r->ts,
+            v0: if (r.has("v0")) do
+                   if (r.has("v1")) do
+                     if (r["v1"].isBool) do
+                       if (r->v1 and r->v0 >= target)
+                         true
+                       else
+                         false
+                     end
+                     else do
+                       if (r->v1 > 0 and r->v0 >= target)
+                         true
+                       else
+                         false
+                     end
+                   end
+                   else
+                     if (r->v0 >= target)
+                       true
+                     else
+                       false
+                 end
+                 else
+                   false})
+          .hisFindPeriods(x => x)
+          .hisFindAll(p => p >= sparkDur)
+      end
+      
+    end
+    
+    return faults
+  
+  end
+  
+  
+---
+id:@p:sentientSites:r:26151931-60515d79 "ruleWAT001"
+name:ruleWAT001
+func
+mod:2020-03-30T20:56:56.049Z
+src:
+  // water meter continous flow for point of use meters
+  (eq, dates, actDur: 30min, target: 4, sparkDur: 4hr) => do
+    
+    // globals
+    faults: [].toGrid
+  
+    // get point history
+    a: readAll(point and energy and equipRef->id == eq->id).hisRead(dates).hisClip
+    // get history count
+    b: a.size
+    // get hours so far for date
+    c: if (dates != today()) 24 else now().hour.as(1)
+    // adjust target based on percentage of hours into history count
+    d: target * (c / b)
+    // find matches
+    faults = a.hisFindPeriods(x => (x > d)).hisFindAll(p => p >= sparkDur)
+    
+    return faults
+  
+  end
+  
+  
+---
+id:@p:sentientSites:r:2615196d-2956a7d4 "ruleWAT003"
+name:ruleWAT003
+func
+mod:2020-03-30T20:56:48.999Z
+src:
+  // water meter high daily usage for point of use
+  // base on rolling 24 hours
+  (eq, dates, actDur: 30min, target:40, sparkDur: 23hr) => do
+  
+    // globals
+    baseTime:  dateTime(dates,time(0,0,0))
+    curTime:   if (dates == today()) now() else dateTime(dates,time(23,59,0))
+    startTime: (curTime - 24hr)
+    baseDur:   (curTime - baseTime).to(1min)
+    faults:    [].toGrid
+    
+    // use his map to query the points daily average value and return T/F
+    faults = readAll(point and energy and equipRef->id == eq->id)
+               .hisRead(startTime..curTime)
+               .hisRollup(sum,1yr)
+               .hisFindPeriods(x => (x > target))
+               .hisFindAll(p => p >= sparkDur)
+  
+    return faults
+  
+  end
+  
+---
+id:@p:sentientSites:r:261519aa-e27ab18d "ruleWAT004"
+name:ruleWAT004
+func
+mod:2020-03-30T20:57:24.115Z
+src:
+  // water meter reading spike for point of use
+  (eq, dates, actDur: 30min, minVal:8, maxVal:2, sparkDur: 1hr) => do
+  
+    // globals
+    faults:    [].toGrid
+    
+    // use his map to query the points daily average value and return T/F
+    faults = readAll(point and energy and equipRef->id == eq->id)
+               .hisRead(dates)
+               .hisMap( (val, ts, his) => if ( val > minVal and val > (maxVal * (his->dailyAvg / 24))) true else false ) 
+               .hisFindPeriods(x => x)
+               .hisFindAll(p => p >= sparkDur)
+    
+    return faults
+  
+  end
+  
+---
+id:@p:sentientSites:r:274694d6-c18b1ecc "sbBoilerShortCycling"
+name:sbBoilerShortCycling
+func
+mod:2020-11-19T20:40:46.473Z
+pod1
+src:
+  // Are the boilers/burners short-cycling (i.e., turning on/off at least 7 times 
+  // in one hour (specified hours... 1-2, 2-3, etc)?
+  // Spark for the remainder of the hour after the boiler has turned on/off at least 7 times
+  // equip query: equip and boiler
+  // point query: point and run and not fault and not flame
+  
+  // Parameters
+  (boiler, dates) => do
+    
+    //Point Filter
+    sensor: readAll(point and run and not fault and not flame and equipRef==boiler->id)
+    
+    // If points query returns empty, return null
+    if (isEmpty(sensor)) return null
+    
+    // Read the history of the sensor 
+    sensorHis: sensor.hisRead(dates)
+    // Define globals
+    faults: [].toGrid()
+    oldHour: null
+    cycle: 0
+    previousV0: null
+    // (r->ts.hour() * 60) + r->ts.minute()
+    // Begin history loop
+    sensorHis.toRecList.each r => do
+      //return r
+      if (oldHour == null) do //since not using hisClip, this is the state just prior to the hour, so save it
+        oldHour = 0
+        previousV0 = r->v0
+      end
+      else do
+        if (r->ts.hour() > oldHour) do// if new hour, reset cycle count
+          oldHour = r->ts.hour()
+          cycle = 0
+        end
+        if (r->v0 == false and r->v0 != previousV0) do // if status true (on) and not same as prior status, increment cycle count
+          cycle = cycle + 1
+        if (cycle == 7) do // if cycle count hit 7, spark (ignore counts under or over 7) REMEMBER TO CHANGE BACK TO 7
+            faults = faults.addRow({ts:r->ts, v0:60 - r->ts.minute()})
+          end
+        end
+        previousV0 = r->v0
+      end
+    end
+    return faults
+  end
+  
+  /*
+  readAll(point and run and not fault and not flame and equipRef->boiler).hisRead(yesterday)
+  readById(@p:sentientSites:r:257aa194-9c0942c6).hisRead(yesterday)
+  sbBoilerShortCycling(readById(@p:sentientSites:r:25781458-d0674740),yesterday) // Example that has 7 shortcycles on 11/17
+  sbBoilerShortCycling(readById(@p:sentientSites:r:25781458-25a6e404),yesterday)
+  
+  
+    faults: [].toGrid()
+    oldHour: null
+    cycle: 0
+    previousV0: null
+  
+    //Point Filter
+    try 
+    readAll(point and run and not fault and not flame and equipRef==boiler->id)
+      .hisRead(dates)
+      .each r => do
+      if (oldHour == null) do //since not using hisClip, this is the state just prior to the hour, so save it
+        oldHour = 0
+        previousV0 = r->v0
+      end
+      else do
+        if (r->ts.hour() > oldHour) do // if new hour, reset cycle count
+          oldHour = r->ts.hour()
+          cycle = 0
+        end
+        if (r->v0 == false and r->v0 != previousV0) do // if status true (on) and not same as prior status, increment cycle count
+          cycle = cycle + 1
+          if (cycle == 2) do // if cycle count hit 7, spark (ignore counts under or over 7) REMEMBER TO CHANGE BACK TO 7
+            faults = faults.addRow({ts:r->ts, v0:60 - r->ts.minute()})
+          end
+        end
+        previousV0 = r->v0
+      end
+      return faults
+      catch
+      return faults
+    end
+  
+  */
+  
+---
+id:@p:sentientSites:r:26769476-e0e0e304 "sbClintonHillCreate"
+name:sbClintonHillCreate
+func
+mod:2020-06-15T15:40:13.426Z
+src:
+  // called from bpClintonImport when unit not found, to try to create unit
+  // param is in format: v185ClintonAvenue_North-v14CD
+  (apt: "") => do
+  
+    // globals
+    region: read(region and clinton, false)
+    site: null
+    floor: null
+    tenant: null
+    equip: null
+    point: null
+    safeName: null
+    temp: ""
+    tempFloor: ""
+    tempApt: ""
+    tags: {}
+    
+  
+    // create site as required
+    temp = apt.split("-")[0]
+    tempFloor = try reGroups(r"(\d+)",temp)[0] catch ""
+    temp = tempFloor + " Clinton Avenue - " + temp.split("_")[1]
+    site = read(parseFilter("site and dis==\"" + temp + "\" and regionRef==@" + region->id), false)
+    if (site == null) do
+      // create safe name for json import
+      safeName = apt.split("-")[0]
+      tags = {}
+      tags = tags.set("site", marker())
+      tags = tags.set(safeName, marker())
+      tags = tags.set("dis",temp)
+      tags = tags.set("regionRef",region->id)
+      tags = tags.set("tz", "New_York")
+      tags = tags.set("geoCountry", "US")
+      diff(null, tags,{add}).commit
+      site = read(parseFilter("site and dis==\"" + temp + "\" and regionRef==@" + region->id),false)
+    end
+  
+    // create floor as required
+    tempFloor = try reGroups(r"(\d+)",apt.split("-")[1])[0] catch ""
+    temp = "Floor " + tempFloor
+    floor = read(parseFilter("floor and dis==\"" + temp + "\" and siteRef==@" + site->id),false)
+    if (floor == null) do
+      diff(null, {dis:temp, floor, navName:temp.replace(" ","-"), regionRef:region->id, siteRef:site->id},{add}).commit
+      floor = read(parseFilter("floor and dis==\"" + temp + "\" and siteRef==@" + site->id),false)
+    end
+  
+    // create tenant as required
+    tempApt = try reGroups(r"(\D+)",apt.split("-")[1][1..-1])[0] catch ""
+    temp = "Apt " + tempFloor + "-" + tempApt
+    tenant = read(parseFilter("tenant and dis==\"" + temp + "\" and floorRef==@" + floor->id),false)
+    if (tenant == null) do
+      diff(null, {dis: temp, tenant, navName:"Apt-" + tempFloor + tempApt, regionRef:region->id, siteRef:site->id, floorRef:floor->id},{add}).commit
+      tenant = read(parseFilter("tenant and dis==\"" + temp + "\" and floorRef==@" + floor->id),false)
+    end
+  
+    // create equip as required
+    equip = read(parseFilter("equip and navName==\"Zone\" and tenantRef==@" + tenant->id),false)
+    if (equip == null) do
+      diff(null, {navName:"Zone", disMacro:"\$tenantRef \$navName", equip, temp, tempSensor, zone, regionRef:region->id, siteRef:site->id, floorRef:floor->id, tenantRef:tenant->id},{add}).commit
+      equip = read(parseFilter("equip and navName==\"Zone\" and tenantRef==@" + tenant->id),false)
+    end
+      
+    // create point as required
+    point = read(parseFilter("point and navName==\"Zone Temperature\" and equipRef==@" + equip->id),false)
+    if (point == null) do
+      diff(null, {navName:"Zone Temperature", disMacro:"\$equipRef \$navName", point, sensor, his, inside, zone, temp, kind:"Number", unit:"°F", tz:"New_York", regionRef:region->id, siteRef:site->id, floorRef:floor->id, tenantRef:tenant->id, equipRef:equip->id},{add}).commit
+      point = read(parseFilter("point and navName==\"Zone Temperature\" and equipRef==@" + equip->id),false)
+    end
+  
+  end
+  
+---
+id:@p:sentientSites:r:26c6e9e1-b48a2b90 "Send Email Alert"
+name:bpEmailAlert
+dis:Send Email Alert
+func
+mod:2020-12-30T20:55:50.004Z
+src:
+  // Send out email if a rule condition sparks for a certain duration  
+  (sparkTime) => do
+   
+    equips: readAll(equip) //Fetch the appropriate records
+   
+    //Sparks are recommended to be run on equips but yes this can be changed as per user interest
+    equips.each e => do  
+      sparksTriggered: e.ruleSparks(toSpan(now() - 24hour..now()), readAll(rule and emailAlert)) //add the appropriate tag
+                        .ruleSparkHis 
+                        .hisFindAll(x => x >= sparkTime) //Find all the sparks that match the threshold condition
+  
+      emailRecipients: try e->siteRef->emailRecipients catch null // contains list of emails (try catch added by sentient 12/30/2020)
+       
+      if (sparksTriggered.size > 0 and emailRecipients.size!=null ) do
+        
+        //Gather the details of which spark has triggered the previous email that was sent.
+        //In Line 28 we write the details onto the equip record as a transient tag
+        lastEmailSentDetails:try e->lastEmailTriggeredBy catch null
+  
+        //If we haven't sent out an email for this today, send the email out
+        if(lastEmailSentDetails==null or lastEmailSentDetails.date < sparksTriggered.sortr("ts").first->ts.date) do
+          startEmailText: "<html><p>Hi there,<br /><br />A high alert spark has been identified. Please see the link below or contact your Energy Engineer at Bright Power.</p>"
+  
+          rulesTriggeredList: sparksTriggered.cols.map c => (c.meta.dis)
+    
+          rulesTriggeredText: "<ul>"
+          rulesTriggeredList.remove(0).each r => do  // remove the first entry which is always the "Timestamp" col      
+            rulesTriggeredText = rulesTriggeredText + "<li>" + r + "</li>"
+          end
+  
+          url: "https://brightpower-skyspark.sentientsite.com" + uiLink({view:"sparkSwivel", state:{targets:[toRecId(e)]}})
+          link: "<a href='" + url + "'>View in SkySpark.</a>"
+          
+          emailHtml: startEmailText + rulesTriggeredText + "</li></ul>" + link + "</html>"
+          emailSend(emailRecipients, "Spark Alert", emailHtml)
+          
+          // After email is sent, record the details as a transient tag on the equip
+          commit(diff(e,{lastEmailTriggeredBy:sparksTriggered.sortr("ts").first->ts,lastEmailSentAt: now()},{transient}))
+  
+        end
+  
+      end
+  
+    end
+     
+  end
+  
+---
+id:@p:sentientSites:r:271b5422-dbbdf3cd "sendSparksEmailDigest"
+name:sendSparksEmailDigest
+func
+mod:2020-10-30T18:38:48.382Z
+src:
+  () => do
+  
+    // to add curTemp to results, insert following in map
+    // curTemp:try round(r->targetRef->curVal) catch "na",
+    // reference pumpRef (r->targetRef->pumpRef->navName)??
+    grid: readAll(point and zone and equipRef->zone and siteRef->mAngelo)
+          .ruleSparks(yesterday, readAll(rule and zoneOver75))
+          .map(r => {location: r->targetRef->siteRef->dis + " " + r->targetRef->tenantRef->navName + " " + r->targetRef->navName,
+                    issue: r->ruleRef->dis,
+                    minTemp: try round(r->targetRef.hisRead(yesterday).hisRollup(min,1day).toRecList[0]->v0) catch "na",
+                    maxTemp: try round(r->targetRef.hisRead(yesterday).hisRollup(max,1day).toRecList[0]->v0) catch "na",
+                    dur: round(r->dur)})
+          .ioWriteTrio("")
+    emailSend(read(rule and zoneOver75)->notify, yesterday() + " Sparks for Ambient Temperature >74°F",grid )
+    //zoneOver75 tag exists on Ambient temperature >75°F rule
+    //notify tag exists on Ambient temperature >75°F rule. Notify tag includes list of email recipients.
+    //emailSend("tmunro@sentientbuildings.net", "Yesterday's Sparks",grid )
+    //emailSend(["email1","email2"],"Subject",grid)
+    return grid
+    
+    
+    
+    // the following sends a nicer pdf but is not working currently
+    //if (readAll(point and zone and siteRef->mAngelo).ruleSparks(yesterday).size > 0) do
+      //emailSend("rselbert@brightpower.com", "Yesterday's Sparks", "(attachment)", [read(favEmailSparks)])
+      //emailSend("tmunro@sentientbuildings.net", "Yesterday's Sparks", "(attachment)", [read(favEmailSparks)])
+    //end
+    //else 
+      //emailSend("rselbert@brightpower.com", "No Sparks Yesterday", "No Sparks")
+      //emailSend("tmunro@sentientbuildings.net", "No Sparks Yesterday", "No Sparks")
+  end
+  
+---
+id:@p:sentientSites:r:272e0181-38313331 "sendSparksEmailZoneOver74"
+name:sendSparksEmailZoneOver74
+func
+mod:2020-12-07T18:59:03.79Z
+src:
+  () => do
+  
+    // to add curTemp to results, insert following in map
+    // curTemp:try round(r->targetRef->curVal) catch "na",
+  
+    grid: readAll(point and zone and equipRef->zone and siteRef->mAngelo)
+          .ruleSparks(yesterday, readAll(rule and zoneOver74))
+          .map(r => {location: r->targetRef->siteRef->dis + " " + r->targetRef->tenantRef->navName + " " + r->targetRef->navName,
+                    issue: r->ruleRef->dis,
+                    pumpSet: r->targetRef->pumpRef->navName,
+                    minTemp: try round(r->targetRef.hisRead(yesterday).hisRollup(min,1day).toRecList[0]->v0) catch "na",
+                    maxTemp: try round(r->targetRef.hisRead(yesterday).hisRollup(max,1day).toRecList[0]->v0) catch "na",
+                    dur: r->dur.format("0.00 U")
+                    })
+          .ioWriteTrio("")
+    emailSend(read(rule and zoneOver74)->notify, yesterday() + " Sparks for Ambient Temperature >74°F",grid )
+    //zoneOver74 tag exists on Ambient temperature >74°F when pumps are on plus 1 hour rule
+    //notify tag exists on Ambient temperature >74°F when pumps are on plus 1 hour rule. Notify tag includes list of email recipients.
+    
+    return grid
+    
+  end
+  
+---
+id:@p:sentientSites:r:27dd40d9-3a892027 "sendToFtpTest"
+name:sendToFtpTest
+func
+mod:2021-03-12T21:32:30.448Z
+src:
+  (tag:"dis", dates:"today") => do  
+    // globals
+    name: ""
+    p: null
+    
+    // FTP Credentials
+    ftp: "ftp://ftp.dlptest.com/"
+    passwordSet(ftp, "dlpuser:rNrKYTX9g7z3RgJRmxWuGHbeu")
+      
+    // get requested sites based on tag
+   /*
+     readAll(parseFilter("site and " + tag)).each s => do
+        
+      // build custom file name of site_date_type
+      name = try s->dis + "_" + dates.toStr() catch ""
+      name = name.replace(" ","_")
+      name = name.replace(",","_")
+  
+      // create csv history per type
+      try do
+        
+        if (not isEmpty(name)) do 
+  
+          p = readAll(point and siteRef == s->id)
+          if (p.size > 0)
+            p.hisRead(toDateSpan(dates), {limit: null}).hisRollupAuto(15min).ioWriteCsv(parseUri(ftp + "/babl/conservice/ftphome/Arvada_Station/" + name + "_combined.csv"))
+        end
+      
+      catch do
+        
+        if (not isEmpty(name)) do 
+  
+          p = readAll(point and not hisErr and siteRef == s->id)
+          if (p.size > 0)
+            p.hisRead(toDateSpan(dates), {limit: null}).hisRollupAuto(15min).ioWriteCsv(parseUri(ftp + "/babl/conservice/ftphome/Arvada_Station/" + name + "_combined.csv"))
+        end
+        
+      end
+  
+    end
+    */
+    
+    [].toGrid().ioWriteCsv(parseUri(ftp + "03_12/" +"test123.csv"))
+    
+  
+    return "done"
+  
+  end
+---
+id:@p:sentientSites:r:26895453-c9509c6c "tempSensorFailure"
+name:tempSensorFailure
+carl
+func
+mod:2020-09-30T20:50:31.959Z
+src:
+  /*
+    Temperate sensor failure - demo customization which
+    wraps standard  'sensorFailure' to add cost, priority tags
+  */
+  (sensor, dates) => do
+  
+    // call standard sensorFailure
+    faults: sensorFailure(sensor, dates)
+    if (faults == null or faults.isEmpty) return faults
+  
+    // add costing/priority to the spark as additional tags
+    faults.addMeta({spark_priority: "med"})
+  end
+---
+id:@p:sentientSites:r:261519e1-494bf869 "test"
+name:test
+func
+mod:2020-10-23T14:09:26.256Z
+src:
+  () => do
+  
+    // to add curTemp to results, insert following in map
+    //curTemp:try round(r->targetRef->curVal) catch "na",
+    grid: readAll(point and zone and equipRef->zone and siteRef->mAngelo)
+          .ruleSparks(yesterday, readAll(rule and zoneOver75))
+          .map(r => {location: r->targetRef->siteRef->dis + " " + r->targetRef->tenantRef->navName + " " + r->targetRef->navName,
+                    issue:r->ruleRef->dis,
+                    minTemp:try round(r->targetRef.hisRead(yesterday).hisRollup(min,1day).toRecList[0]->v0) catch "na",
+                    maxTemp:try round(r->targetRef.hisRead(yesterday).hisRollup(max,1day).toRecList[0]->v0) catch "na",
+                    dur:round(r->dur)})
+          .ioWriteTrio("")
+    emailSend(read(rule and zoneOver75)->notify2, yesterday() + " Sparks for Ambient Temperature >75°F",grid )
+    return grid
+  
+  
+  
+  
+      //uri: `https://api-neurohub.sentientbuildings.com/neurohub-db/export`
+      //method: "GET"
+      //headers: {"Content-Type": "text/plain", "X-API-KEY": "7H5kNuQ6ZD2W62uzVVIDFaHUJFA4MoXq7qS3OuXM"}
+      //body: "{\"id\":\"800000\",\"dataProvider\":\"h2o\",\"equipType\":\"water-meter\",\"site\":\"\",\"filter\":\"Contour\",\"limit\":\"100\"}"
+      
+      //return dcHttp(uri,headers,body,method)
+  
+  
+  /*
+    // calculate and save daily average water use
+    readAll(point and energy and equipRef->water).each r => do
+      a: 0
+      try 
+        a = r.hisRead(lastWeek).hisRollup(sum,1day).hisRollup(avg,1week).toRecList[0]["v0"].as(1).ceil  
+      catch
+        a = 0
+      diff(r,{dailyAvg:a}).commit
+    end
+  */
+  
+  end
+  
+---
+id:@p:sentientSites:r:26892b36-cbab37a2 "testkpi"
+name:testkpi
+func
+mod:2020-06-26T23:21:04.024Z
+src:
+  (site, dates) => do
+  
+    pt:(read(zone and temp and sensor and siteRef==readByIds(site,false)->id))
+    
+    avgTemp: hisRead(pt,dates).foldCol("v0", avg)
+    {avg:avgTemp}
+    
+  end
+---
+id:@p:sentientSites:r:274693cc-e196d55c "testRule"
+name:testRule
+func
+mod:2020-11-17T14:03:08.831Z
+src:
+  (thePoint, dates, thresh: 10) => do
+    
+    // Run on any point
+    hisGrid: thePoint.hisRead(dates)
+      
+      // Clean up data
+      .findAll( row => row.has("v0") and row["v0"] != na() )
+      if (hisGrid.size < 2) return null
+      
+      // Get flips/h
+      .sfxHisDerivative
+      
+      // Find periods of too many flips
+      .hisFindPeriods(x => abs(x) > thresh)
+  
+  end
+---
+id:@p:sentientSites:r:26594399-39277238 "water"
+name:water
+func
+mod:2020-05-21T15:10:28.194Z
+src:
+  // ssRegion is the SkySpark region and dbName is the db project
+  (ssRegion:"contour", dbProject:"h2o") => do
+    
+    // globals
+    point: null
+    row: null
+    lastWrite: null
+    postDate: null
+    lastFile: null
+    files: null
+    lastSyncPoint: null
+    lastTSync: null
+    lastWSync: null
+    exceptList: ""
+    writeList: []
+  
+  
+    // grab the last sync point from the region record
+    region: read(parseFilter("region and " + ssRegion), false)
+  
+    // verify region record found
+    if (region == null) 
+      return "Error: Region " + ssRegion + " not found"
+    else do
+  
+  
+  
+      // process water meter data
+      // -------------------------
+  
+      // grab last sync point
+      lastSyncPoint = region["lastWSyncPoint"]
+      if (lastSyncPoint == null)
+        lastSyncPoint = "0";
+  
+  
+      // grab json from input connector where newer than last sync point
+      uri: `https://api-neurohub.sentientbuildings.com/neurohub-db/export`
+      method: "GET"
+      headers: {"Content-Type": "text/plain", "X-API-KEY": "7H5kNuQ6ZD2W62uzVVIDFaHUJFA4MoXq7qS3OuXM"}
+      body: "{\"id\":\"" + lastSyncPoint + "\",\"dataProvider\":\"h2o\",\"equipType\":\"water-meter\",\"site\":\"\",\"filter\":\"Contour\",\"limit\":\"500\"}"
+      data: dcHttp(uri,headers,body,method).ioReadJson({safeNames})
+  
+      // process data
+      // data row [{dataContent:[{...}],id=n},...]
+      data.each x => do
+      
+      try
+  
+        // see if data packet available
+        if (x.has("dataContent")) do
+  
+          // process json point values
+          x->dataContent.each r => do
+  
+            // ensure json has required property
+            if (r.has("header")) do
+  
+              // find point based on equip serial number
+              point = read(point and energy and equipRef->partnerId==r->header->serial_number, false)
+  
+              // if point found, add history
+              if (point != null) do
+  
+                lastWrite = point["hisEnd"]
+                postDate = parseDateTime(r->header->timestamp, pattern: "YYYY-MM-DD hh:mm:SS")
+  
+                // if no history yet, seed with postDate
+                if (lastWrite == null) lastWrite = (postDate - 1hr)
+  
+                // only write history if timestamp > point hisEnd
+                if (postDate > lastWrite) do
+                  //writeList = writeList.add([r->header->serial_number,postDate,r->payload->gallons])
+                  hisWrite({ts:postDate, val:r->payload->gallons},point)
+                end
+  
+              end
+              // else add point to exception list
+              else
+                exceptList = exceptList + "h2ow, " + r->header->serial_number + ", " + r->header->location_assignment->building_name + "-" + r->header->location_assignment->apartment + "\n"
+  
+            end
+  
+          end // row
+          // track last file name
+          lastWSync = x->id
+  
+        end // value check
+  
+        catch(e) do
+          // API errors include: Server Error, No Records
+          return data 
+        end
+  
+      end // data rows
+  
+      if (lastWSync != null)
+        diff(region,{"lastWSyncPoint":lastWSync}).commit
+  
+    end
+    
+    now()
+  end
+  
+  
+  
+---
+id:@p:sentientSites:r:2707a95b-4b72af6c "Water Consumption"
+name:bpKpiWater
+dis:Water Consumption
+func
+kpiRule
+mod:2020-10-26T19:25:01.675Z
+ruleOn:volume and siteMeter
+src:
+  (site, dates) => do
+    pt: read(flow and equipRef->siteMeter and siteRef==site->id, false)
+    if (pt == null) return null
+  
+    his: hisRead(pt, dates).hisClip()
+  
+  
+    kpiSum: his.foldCol("v0",sum)
+    if (na() == kpiSum) null else {avg: kpiSum}
+  end
+---
+id:@p:sentientSites:r:275c0869-3e4ccd35 "weeklyEmailDigest"
+name:weeklyEmailDigest
+func
+mod:2021-03-15T17:55:55.134Z
+pod1
+src:
+  // Weekly email summary of all sparks with autoAlert tag triggered the previous week
+  // Send weekly to all clients
+  
+  () => do
+    gridTotal: null
+    sites: readAll(site)
+  
+    // s start loop to iterate through sites
+    // pull data for each site and send the email
+  
+    sites.each s => do
+      siteName: s->dis
+      engineer: s->energyEngineer
+      
+      emailBody: "Hi, \n\nBelow is a weekly summary of auto Sparks that were triggered last week at " + siteName + ". Please follow up with your Energy Engineer, " + engineer + ", at Bright Power to discuss action plans to correct or acknowledge the Sparks, or any questions you may have after reviewing the data. You can also log into your SkySpark account to review the data in more detail here, https://brightpower-skyspark.sentientsite.com.  If you have any issues logging in, please contact your Energy Engineer at Bright Power. \n\n"
+  
+      // Create 2 grids - one for aptTemp sparks and one for all other sparks
+    
+      // Create grid for all sparks that are not apartment temp sparks
+      grid1: readAll((point or equip or site) and siteRef==toRecId(s))
+              .sparkRollup(lastWeek, readAll(rule and not aptTemp and autoAlert))
+              .map(r => {location: r->group->siteRef->dis + " " + r->group->tenantRef->navName + " " + r->group->navName,
+                  issue: r->rule->dis,
+                  dur: r->dur.format("0.00 U")
+                })
+                  
+      // Create grid for apartment temp sparks
+      grid2: readAll(point and zone and siteRef==toRecId(s))
+             .sparkRollup(lastWeek, readAll(rule and aptTemp and autoAlert))  // aptTemp tag exists on all rules that measure apartment temp for sites that have apartment sensors
+             .map(r => {location: r->group->siteRef->dis + " " + r->group->tenantRef->navName + " " + r->group->navName,
+                 issue: r->rule->dis,
+                 minTemp: try round(r->group.hisRead(lastWeek).hisRollup(min,1week).toRecList[0]->v0) catch "na",
+                 maxTemp: try round(r->group.hisRead(lastWeek).hisRollup(max,1week).toRecList[0]->v0) catch "na",
+                 dur: r->dur.format("0.00 U")
+                 })
+        
+      gridTotal = emailBody + grid1.ioWriteTrio("") + "\n" + grid2.ioWriteTrio("")
+      
+      if ((not grid1.isEmpty()) or (not grid2.isEmpty())) do
+        emailSend(s->testEmailRecipients, lastWeek().start() + " Summary of Sparks Triggered Last Week", gridTotal)
+      end
+    
+    end 
+    
+    return gridTotal
+    
+  end
+  
+---
+id:@p:sentientSites:r:26f68176-958e990b "Zone Temp Average"
+name:bpZoneTempAvg
+dis:Zone Temp Average
+func
+help:Average space temperature per site floor
+kpiRule
+mod:2020-11-18T18:14:24.327Z
+pod1
+rachel
+ruleOn:floor
+src:
+  (floor, dates, minTemp, maxTemp) => do
+  
+    // Find average zone temp per floor
+    // ruleOn: floor
+    
+    sensor: readAll(point and zone and temp and sensor and not status and floorRef==floor->id)
+    
+    temps: hisRead(sensor, dates, {limit:null})
+    .hisClip() // remove leading/trailing timestamps
+    .hisFindAll(t => t > minTemp and t < maxTemp)
+    // Conditional statement to only include values inside valid data range
+    
+    {avg: temps.hisFoldCols(avg).foldCol("v0",avg)}
+  end
+---
+id:@p:sentientSites:r:27010018-4506d968 "Zone Temp Min and Max"
+name:bpZoneTempMinMax
+dis:Zone Temp Min and Max
+func
+kpiRule
+mod:2020-11-18T18:14:32.83Z
+pod1
+rachel
+ruleOn:floor
+src:
+  (floor, dates, minTemp, maxTemp) => do
+  
+    sensor: readAll(point and zone and temp and sensor and not status and floorRef==floor->id)
+    
+    temps: hisRead(sensor, dates, {limit:null})
+    .hisClip()
+    .hisFindAll(t => t > minTemp and t < maxTemp)
+    // Conditional statement to only include values inside valid data range
+    
+    {min: temps.hisFoldCols(min).foldCol("v0",min), max: temps.hisFoldCols(max).foldCol("v0",max)}
+  end
+---
+id:@p:sentientSites:r:26151a8f-c35b875a "24 hour Water Usage > 40 gallons"
+dis:"24 hour Water Usage > 40 gallons"
+help:"24 hour Water Usage > 40 gallons"
+mod:2020-03-30T21:01:03.8Z
+rule
+ruleCost:""
+ruleFunc:"ruleWAT003(_,_,30min,40,23hr)"
+ruleOn:equip and meter and water and not riser
+---
+id:@p:sentientSites:r:2639af2f-e85d02b1 "AHU shortcycling"
+dis:AHU shortcycling
+color:"#9b59b6"
+help:"AHU status turning on/off (cycling) in a way resembling short-cycling (staying off/on for less than 15 minutes)."
+mod:2020-10-05T18:42:08.126Z
+rule
+ruleFunc:"bpAhuShortcycling(_,_,15min,15min)"
+ruleOn:equip and ahu
+sparkRule
+---
+id:@p:sentientSites:r:26449312-274aa62b "Ambient temperature <60°F"
+dis:"Ambient temperature <60°F"
+aptTemp
+autoAlert
+color:"#3498db"
+help:"Ambient apartment temperature (AHU) less than 60°F for a minute or more."
+lenox
+mod:2022-03-03T14:05:55.825Z
+pod1
+rule
+ruleFunc:"bpAptTempTooLow(_,_,60°F,1min)"
+ruleOn:"point and zone and equipRef->zone and not deviceStatus and not status"
+sparkRule
+---
+id:@p:sentientSites:r:271b53a4-5b49d1cc "Ambient temperature >74°F"
+dis:"Ambient temperature >74°F"
+color:"#c0392b"
+disabled
+help:"Ambient apartment temperature greater than 74°F for 30 minutes or more."
+mod:2020-10-30T20:06:00.065Z
+notify:["cgordon@brightpower.com","jfregara@bsrmgmt.com","Matt.spinksr@1energygroup.com","Bill.manfredi@1energygroup.com","hernandezmj1759@aol.com","Stuart@1energygroup.com","MTRooney@mdgny.com","pogen@brightpower.com","rselbert@brightpower.com"]
+notifyTest:["cgordon@brightpower.com","rselbert@brightpower.com","pogen@brightpower.com"]
+rule
+ruleFunc:"bpAptTempTooHighMichaelangelo(_,_,74°F,30min)"
+ruleOn:"point and zone and equipRef->zone and siteRef->mAngelo"
+sparkRule
+zoneOver75
+---
+id:@p:sentientSites:r:272dd6a4-453bbbfa "Ambient temperature >74°F when pumps are on plus 1 hour"
+dis:"Ambient temperature >74°F when pumps are on plus 1 hour"
+color:"#c0392b"
+help:"Ambient apartment temperature greater than 74°F for 30 minutes or more when respective pumps are on plus 1 hour after respective pumps are off."
+mod:2020-11-30T17:18:45.207Z
+notify:["cgordon@brightpower.com","jfregara@bsrmgmt.com","Matt.spinksr@1energygroup.com","Bill.manfredi@1energygroup.com","hernandezmj1759@aol.com","Stuart@1energygroup.com","MTRooney@mdgny.com","pogen@brightpower.com","rselbert@brightpower.com","melrose@bsrmgmt.com"]
+notifyTest:["rselbert@brightpower.com"]
+rule
+ruleFunc:"bpAptTempTooHighAndPumpsRunningMichaelangelo(_,_,74°F,30min)"
+ruleOn:"point and zone and equipRef->zone and siteRef->mAngelo"
+sparkRule
+zoneOver74
+---
+id:@p:sentientSites:r:2644933f-29bec52e "Ambient temperature >80°F during heating season"
+dis:"Ambient temperature >80°F during heating season"
+aptTemp
+color:"#8e44ad"
+help:"Ambient apartment temperature (AHU) greater than 80°F for a minute or more during heating season (<55°F)."
+mod:2020-12-07T18:50:21.996Z
+pod1
+rule
+ruleFunc:"bpAptTempTooHighHeatingSeason(_,_,80°F,55°F,1min)"
+ruleOn:equip and zone
+sparkRule
+---
+id:@p:sentientSites:r:2644936a-a4f0e963 "Ambient temperature >95°F"
+dis:"Ambient temperature >95°F"
+aptTemp
+color:"#e74c3c"
+help:"Ambient apartment temperature (AHU) greater than 95°F for a minute or more."
+mod:2020-12-07T18:50:21.996Z
+pod1
+rule
+ruleFunc:"bpAptTempTooHigh(_,_,95°F,1min)"
+ruleOn:equip and zone
+sparkRule
+---
+id:@p:sentientSites:r:26629b02-93b54f6a "Boiler/Burner Shortcycling"
+dis:"Boiler/Burner Shortcycling"
+autoAlert
+color:"#2c3e50"
+help:"Boiler/burner short-cycling (i.e. turning off/on at least 7 times in specified one hour periods (1-2pm, 2-3pm, etc))."
+lenox
+mod:2022-03-03T14:06:09.078Z
+pod1
+rule
+ruleFunc:"sbBoilerShortCycling(_,_)"
+ruleOn:equip and boiler
+sparkRule
+---
+id:@p:sentientSites:r:26556ffb-37222cb0 "Boiler(s) in Fault"
+dis:"Boiler(s) in Fault"
+color:"#e67e22"
+help:"Is a boiler currently in fault?"
+mod:2020-11-18T17:29:59.891Z
+pod1
+rule
+ruleFunc:"bpBoilersInFault(_,_)"
+ruleOn:equip and boiler
+sparkRule
+---
+id:@p:sentientSites:r:265959ff-44714214 "Boiler HW temperature more than 5°F different from setpoint"
+dis:"Boiler HW temperature more than 5°F different from setpoint"
+color:"#e74c3c"
+help:"Boiler HW temperature has deviated from the controller setpoint temperature by 5°F or more for at least 30 minutes while outdoor air temperature exceeds 50°F."
+mod:2020-11-18T18:11:30.067Z
+pod1
+rule
+ruleFunc:"bpBoilersDeviatingFromSetpoint(_,_,5,50°F,30min)"
+ruleOn:equip and boiler and not controller
+sparkRule
+---
+id:@p:sentientSites:r:265a9b65-2b1a0684 "Boiler Pressure >4psi"
+dis:"Boiler Pressure >4psi"
+color:"#e74c3c"
+help:"The boiler pressure is too high (>4 psi)."
+mod:2020-10-05T18:42:08.126Z
+rule
+ruleFunc:"bpBoilerPressureTooHigh(_,_,4psi,30min)"
+ruleOn:equip and boiler and plant and steam
+sparkRule
+---
+id:@p:sentientSites:r:265aa50c-ea4e0d02 "Boiler pressure high while OA Temp >56°F"
+dis:"Boiler pressure high while OA Temp >56°F"
+color:"#f1c40f"
+help:"Boiler pressure >1psi when outdoor air temperature is >56°F."
+mod:2020-10-05T18:42:08.126Z
+rule
+ruleFunc:"bpBoilerPressureHighWhileOaTempHigh(_,_,1psi,56°F,30min)"
+ruleOn:equip and boiler and plant and steam
+sparkRule
+---
+id:@p:sentientSites:r:265ab2cd-00ac1b86 "Boiler pressure low while OA Temp <50°F/<44°F day/night"
+dis:"Boiler pressure low while OA Temp <50°F/<44°F day/night"
+color:"#f1c40f"
+help:"Boiler steam pressure <1psi when outdoor air temperature is <50°F (6am to 10pm) and <44°F (10pm to 6am)."
+mod:2020-10-05T18:42:08.126Z
+rule
+ruleFunc:"bpBoilerPressureLowWhileOaTempLow(_,_,1psi,50°F, 44°F,30min)"
+ruleOn:equip and boiler and plant and steam
+sparkRule
+---
+id:@p:sentientSites:r:2655b6c2-2232c95f "Boilers on Longer Than Expected/Not Cycling Operation"
+dis:"Boilers on Longer Than Expected/Not Cycling Operation"
+color:"#95a5a6"
+help:"Is a boiler ON longer than 12 hours at a time? If so, it could be not cycling operations correctly."
+lenox
+mod:2022-03-03T14:07:07.313Z
+rule
+ruleFunc:"bpBoilersOperatingUnevenly(_,_,12hr)"
+ruleOn:equip and boiler
+sparkRule
+---
+id:@p:sentientSites:r:27e37141-b12a599f "Boiler Temperature lower than 120°F"
+dis:"Boiler Temperature lower than 120°F"
+color:"#2ecc71"
+help:"Has the boiler temperature been less than 120°F for more than 15 minutes? (For hydronic boilers)"
+lenox
+mod:2022-03-03T14:06:30.307Z
+rule
+ruleFunc:"bpBoilerTempTooLow(_,_,120°F,15min)"
+ruleOn:equip and boiler and hydronic
+sparkRule
+---
+id:@p:sentientSites:r:2659879d-0e9052d4 "Boiler Temperature lower than 165°F"
+dis:"Boiler Temperature lower than 165°F"
+autoAlert
+color:"#3498db"
+help:"Has the boiler temperature been less than 165°F for more than 15 minutes? (For steam boilers)"
+lenox
+mod:2022-03-03T14:07:22.805Z
+pod1
+rule
+ruleFunc:"bpBoilerTempTooLow(_,_,165°F,15min)"
+ruleOn:equip and boiler and steam
+sparkRule
+---
+id:@p:sentientSites:r:2651a42d-8cc33f3e "Booster Pumps/Domestic Water Pumps appear to be shortcycling"
+dis:"Booster Pumps/Domestic Water Pumps appear to be shortcycling"
+color:"#2c3e50"
+help:
+  Are the booster pumps/domestic water pumps short-cycling over 10 
+   minute intervals?
+mod:2020-10-05T18:42:08.126Z
+rule
+ruleFunc:"bpBoosterPumpsShortcycling(_,_,10min,10min)"
+ruleOn:" pump and water and domestic"
+sparkRule
+---
+id:@p:sentientSites:r:26629dd9-522634c1 "Burner controller safety triggered"
+dis:Burner controller safety triggered
+autoAlert
+color:"#e74c3c"
+help:"Is the burner controller safety triggered (i.e, if safety is ON for any amount of time)?"
+mod:2020-12-17T21:52:47.094Z
+pod1
+rule
+ruleFunc:"bpBurnerControllerSafetyTriggered(_,_)"
+ruleOn:equip and boiler
+sparkRule
+---
+id:@p:sentientSites:r:263ee4d2-6cd4680f "CHW > 5°F above setpoint"
+dis:"CHW > 5°F above setpoint"
+autoAlert
+color:"#c0392b"
+help:"The chiller supply temperature has been above the setpoint by more than 5°F for 30 min or more."
+mod:2020-12-17T22:05:03.232Z
+pod2
+rule
+ruleFunc:"bpChillerAboveSetpoint(_,_,5,30min)"
+ruleOn:equip and chiller
+sparkRule
+---
+id:@p:sentientSites:r:263603d4-0d04fd1e "CHW Temp < 40°F"
+dis:"CHW Temp < 40°F"
+color:"#3498db"
+help:"Chilled water supply temperature has been below 40°F for more than 1 minute."
+mod:2020-10-05T18:42:08.126Z
+rule
+ruleFunc:"bpChillerTempTooLow(_,_,40°F,1min)"
+ruleOn:equip and chiller
+sparkRule
+---
+id:@p:sentientSites:r:263a0472-787704bb "CHW Temp > 55°F and OA temp > 65°F"
+dis:"CHW Temp > 55°F and OA temp > 65°F"
+color:"#c0392b"
+help:"The outside air temperature is more than 65°F and the chilled water supply temperature is more than 55°F"
+mod:2020-10-05T18:42:08.126Z
+rule
+ruleFunc:"bpChillerTempTooHigh(_,_,55°F,65°F,30min)"
+ruleOn:equip and chiller
+sparkRule
+---
+id:@p:sentientSites:r:26d95062-5e5bff40 "CO2 Level Higher Than 1000ppm for 30mins"
+dis:CO2 Level Higher Than 1000ppm for 30mins
+autoAlert
+color:"#2980b9"
+help:""
+mod:2020-12-17T22:05:03.232Z
+pod2
+rachel
+rule
+ruleFunc:"bpCO2TooHigh(_,_,1000ppm,30min)"
+ruleOn:equip and ahu
+sparkRule
+---
+id:@p:sentientSites:r:26f4ee6e-3cbcfdb0 "CO2 Level Higher Than 1500ppm for 15mins"
+dis:CO2 Level Higher Than 1500ppm for 15mins
+color:"#2980b9"
+help:""
+mod:2020-12-16T14:03:55.835Z
+rachel
+rule
+ruleFunc:"bpCO2TooHigh(_,_,1500ppm,15min)"
+ruleOn:equip and ahu
+sparkRule
+---
+id:@p:sentientSites:r:26517656-b6656674 "Combustion Air Fan Alarm"
+dis:Combustion Air Fan Alarm
+color:"#2c3e50"
+help:"Is a combustion air fan (CAF) on ALARM status (i.e., a CAF is off but one or more boilers is on)?"
+mod:2020-10-05T18:42:08.126Z
+rule
+ruleFunc:"bpCombustionAirFansNotWorking(_,_)"
+ruleOn:equip and boiler
+sparkRule
+---
+id:@p:sentientSites:r:262b3beb-758ff66f "Condensate return temperature greater than 180°F"
+dis:"Condensate return temperature greater than 180°F"
+autoAlert
+color:"#e74c3c"
+help:"Is the condensate return temperature greater than 180°F for 1 min?"
+mod:2020-12-17T22:04:14.59Z
+pod2
+rule
+ruleFunc:"bpCondensateReturnTempTooHigh(_,_,180°F,1min)"
+ruleOn:equip and condensate
+sparkRule
+---
+id:@p:sentientSites:r:26151a6e-4e966401 "Continuous Usage detected over last 4 hours"
+dis:Continuous Usage detected over last 4 hours
+help:"Continuous Usage detected over last 4 hours."
+mod:2020-03-30T21:00:30.502Z
+rule
+ruleCost:""
+ruleFunc:"ruleWAT001(_,_,30min,4,4hr)"
+ruleOn:equip and meter and water and not riser
+---
+id:@p:sentientSites:r:26895406-9d321285 "Data has not changed in 24 hours"
+dis:Data has not changed in 24 hours
+carl
+color:"#27ae60"
+help:
+  Sensor has failed to change over 24 hour period. Because it requires a full day of analysis, this rule always skips today.
+  
+  Recommended Actions
+  ===================
+  1. Check calibration settings in control system
+  2. Physical replacement of the sensor
+  
+  **Priority:** Medium
+impact:Fault
+lenox
+mod:2022-03-03T14:06:45.345Z
+rule
+ruleFunc:tempSensorFailure
+ruleOn:temp and sensor and point
+sparkRule
+---
+id:@p:sentientSites:r:26448a34-2a61e6fa "DHW supply temp < 100°F"
+dis:"DHW supply temp < 100°F"
+color:"#3498db"
+help:"DHW supply temperature below 100°F for more than 3 minutes."
+lenox
+mod:2022-03-03T14:08:01.135Z
+pod1
+rule
+ruleFunc:"bpDhwSupplyTempTooLow(_,_,100°F,3min)"
+ruleOn:equip and dhw and loop
+sparkRule
+---
+id:@p:sentientSites:r:26448a5d-6dcd4739 "DHW supply temp < 110°F"
+dis:"DHW supply temp < 110°F"
+color:"#3498db"
+disabled
+help:"DHW supply temperature below 110°F for more than 30 minutes."
+mod:2021-03-16T13:30:09.082Z
+pod1
+rule
+ruleFunc:"bpDhwSupplyTempTooLow(_,_,110°F,30min)"
+ruleOn:equip and dhw and loop
+sparkRule
+---
+id:@p:sentientSites:r:26448a85-efe75917 "DHW supply temp > 125°F"
+dis:"DHW supply temp > 125°F"
+color:"#e74c3c"
+disabled
+help:"DHW supply temperature above 125°F for more than 30 minutes."
+mod:2021-03-16T13:30:02.501Z
+pod1
+rule
+ruleFunc:"bpDhwSupplyTempTooHigh(_,_,125°F,30min)"
+ruleOn:equip and dhw and loop
+sparkRule
+---
+id:@p:sentientSites:r:26448acf-3b5b965e "DHW supply temp > 135°F"
+dis:"DHW supply temp > 135°F"
+autoAlert
+color:"#e74c3c"
+disabled
+help:"DHW supply temperature above 135°F for more than 3 minutes."
+mod:2021-03-16T13:46:18.884Z
+pod1
+rule
+ruleCost:"100.00\$ per hour"
+ruleFunc:"bpDhwSupplyTempTooHigh(_,_,135°F,3min)"
+ruleOn:equip and dhw and loop
+sparkRule
+---
+id:@p:sentientSites:r:27348754-583ce8cf "DHW supply temp > 145°F"
+dis:"DHW supply temp > 145°F"
+color:"#e74c3c"
+emailAlert
+help:"DHW supply temperature above 145°F for more than 3 minutes."
+mod:2020-12-17T21:47:15.361Z
+pod1
+rule
+ruleFunc:"bpDhwSupplyTempTooHigh(_,_,145°F,3min)"
+ruleOn:equip and dhw and loop
+sparkRule
+---
+id:@p:sentientSites:r:27075f52-cee27609 "DHW Supply Temp Average"
+dis:DHW Supply Temp Average
+color:"#f39c12"
+help:"Average DHW supply temperature within valid data range of 60-180."
+kpiRule
+mod:2020-11-18T18:13:13.602Z
+pod1
+rule
+ruleFunc:"bpDhwSupplyTempAvg(_,_,60,180)"
+ruleOn:site
+---
+id:@p:sentientSites:r:27075f52-459a9b35 "DHW Supply Temp Min and Max"
+dis:DHW Supply Temp Min and Max
+color:"#e67e22"
+help:"Minimum and maximum DHW supply temperature within valid data range of 60-180."
+kpiRule
+mod:2020-11-18T18:13:13.602Z
+pod1
+rule
+ruleFunc:"bpDhwSupplyTempMinMax(_,_,60,180)"
+ruleOn:site
+---
+id:@p:sentientSites:r:2651a108-32767d1a "Domestic Water/Booster Pumps have not run in the last 1 hour"
+dis:"Domestic Water/Booster Pumps have not run in the last 1 hour"
+color:"#7f8c8d"
+help:"Are the domestic water/booster pumps not working (i.e., not running in the last 1hr)?"
+mod:2020-10-05T18:42:08.126Z
+rule
+ruleFunc:"bpDomesticWaterPumpsNotWorking(_,_,1hr)"
+ruleOn:equip and pump and water and domestic
+sparkRule
+---
+id:@p:sentientSites:r:264dcdc0-e9616527 "Domestic water pumps have not run in the last 6 hours"
+dis:Domestic water pumps have not run in the last 6 hours
+autoAlert
+color:"#7f8c8d"
+help:"No domestic water pump at the property has been run in the last 6 hours."
+mod:2020-12-17T22:04:14.59Z
+pod2
+rule
+ruleFunc:"bpDomesticWaterPumpsNotWorking(_,_,6hr)"
+ruleOn:equip and pump and water and domestic
+sparkRule
+---
+id:@p:sentientSites:r:26506c8c-c2cea2e0 "Domestic water pumps running longer than 30 minutes"
+dis:Domestic water pumps running longer than 30 minutes
+autoAlert
+color:"#e67e22"
+help:"Has a domestic water pump been running longer than 30 minutes?"
+mod:2020-12-17T22:04:14.59Z
+pod2
+rule
+ruleFunc:"bpDomesticWaterPumpsWorkingTooMuch(_,_,30min)"
+ruleOn:equip and pump and water and domestic
+sparkRule
+---
+id:@p:sentientSites:r:27075f52-ea4f30e2 "Gas Consumption"
+dis:Gas Consumption
+color:"#e74c3c"
+help:"Site gas consumption min, max, average over time period."
+kpiRule
+mod:2020-10-02T15:46:26.503Z
+rule
+ruleFunc:bpKpiGas
+ruleOn:site
+---
+id:@p:sentientSites:r:2659aab9-9c42ea0f "Heating system losing >20% more water than usual"
+dis:"Heating system losing >20% more water than usual"
+autoAlert
+color:"#2980b9"
+help:"The heating system is losing more than 20% more water than usual, based on the last year of usage."
+lenox
+mod:2022-03-03T14:08:33.243Z
+pod2
+rule
+ruleFunc:"bpHeatingSystemLosingMoreWaterThanUsual(_,_,0.2,1day)"
+ruleOn:equip and meter and water and makeup
+sparkRule
+---
+id:@p:sentientSites:r:26598aff-d5e697a1 "Heating system losing too much water (>1 gal/day)"
+dis:"Heating system losing too much water (>1 gal/day)"
+autoAlert
+color:"#2980b9"
+help:"Is the heating system losing too much water (i.e., is usage > 1 gallon/day)?"
+lenox
+mod:2022-03-03T14:08:48.027Z
+pod2
+rule
+ruleFunc:"bpHeatingSystemLosingWater(_,_,1gal,1day)"
+ruleOn:equip and meter and water and makeup
+sparkRule
+---
+id:@p:sentientSites:r:2655b468-23f82e90 "HHW Pump is on and OA temp > 56°F"
+dis:"HHW Pump is on and OA temp > 56°F"
+autoAlert
+color:"#f39c12"
+emailAlert
+help:"The outside air temperature is above 56°F and a HHW pump has run for over half an hour."
+mod:2020-12-17T21:52:47.094Z
+pod1
+rule
+ruleCost:"15\$ per hour"
+ruleFunc:"bpHhwPumpOnAndHotOutside(_,_,56°F,30min)"
+ruleOn:equip and pump and hot and water and not domestic
+sparkRule
+---
+id:@p:sentientSites:r:2662d11f-42e4e2a6 "HHW Pumps are off and OA Temp < 50°F"
+dis:"HHW Pumps are off and OA Temp < 50°F"
+color:"#f39c12"
+help:"None of the HHW pumps in a set are running and it's less than 50°F outside."
+mod:2020-11-18T17:27:01.154Z
+pod1
+rule
+ruleFunc:"bpHhwPumpsOffAndColdOutside(_,_,50°F,30min)"
+ruleOn:equip and pump and hot and water and not domestic
+sparkRule
+---
+id:@p:sentientSites:r:2662ce69-69416746 "HHW Pumps Running in Parallel"
+dis:HHW Pumps Running in Parallel
+color:"#f39c12"
+help:"At least 2 pumps in a HHW pump set have been running at the same time for 15 min or more."
+mod:2020-11-18T17:28:37.101Z
+pod1
+rule
+ruleFunc:"bpHhwPumpsRunningParallel(_,_,15min)"
+ruleOn:equip and pump and hot and water and not domestic
+sparkRule
+---
+id:@p:sentientSites:r:27075f52-91d96737 "kWh consumption"
+dis:kWh consumption
+color:"#e74c3c"
+help:"Site electrical kWh consumption min, max, average over time period."
+kpiRule
+mod:2020-10-01T19:59:31.192Z
+rule
+ruleFunc:bpKpiKwh
+ruleOn:site
+---
+id:@p:sentientSites:r:27075f52-834b6d9d "Leak Detected for more than 5mins"
+dis:Leak Detected for more than 5mins
+autoAlert
+color:"#27ae60"
+emailAlertInstant
+help:Leak detected for more than 5 minutes
+mod:2020-12-18T14:51:19.386Z
+pod1
+rule
+ruleFunc:"bpLeakDetection(_,_,5min)"
+ruleOn:equip and leak
+sparkRule
+---
+id:@p:sentientSites:r:262b36f7-dd56ce55 "Outdoor Air Temperature Sensors Failing"
+dis:Outdoor Air Temperature Sensors Failing
+color:"#9b59b6"
+help:"Outdoor Air Temperature is outside the expected range (-10°F < OA Temp < 110°F)"
+mod:2020-11-18T17:22:22.183Z
+pod1
+rule
+ruleFunc:"bpOaTempSensorsFailed(_,_,-10°F,110°F,1min)"
+ruleOn:equip and temp and sensor
+sparkRule
+---
+id:@p:sentientSites:r:26855cc0-927b90cf "Pump Running Time KPI"
+dis:Pump Running Time KPI
+color:"#bdc3c7"
+help:"This is a KPI the shows pump run time."
+kpiRule
+mod:2020-07-13T17:46:49.861Z
+rule
+ruleFunc:"bpPumpRuntime(_,_)"
+ruleOn:site
+---
+id:@p:sentientSites:r:27075f52-4a1c814d "Pump Runtime"
+dis:Pump Runtime
+color:"#8e44ad"
+disabled
+help:""
+kpiRule
+mod:2020-09-30T15:22:58.649Z
+rule
+ruleFunc:bpKpiPump
+ruleOn:site
+---
+id:@p:sentientSites:r:264c8225-74a010e1 "Pumps Running in Parallel"
+dis:Pumps Running in Parallel
+color:"#f39c12"
+help:"More than 1 pump has been running at a time for 1 minute or longer. This encompasses all types of pumps in a set and may apply to DHW pumps, HHW circulation pumps, etc. (i.e. any equip with the pump tag)."
+mod:2020-11-18T17:26:02.936Z
+pod1
+rule
+ruleFunc:"bpPumpsRunningParallel(_,_,1min)"
+ruleOn:equip and pump
+sparkRule
+---
+id:@p:sentientSites:r:264d81f0-b4c5adc8 "Return HW Temp <115°F (OA Temp <55°F)"
+dis:"Return HW Temp <115°F (OA Temp <55°F)"
+color:"#3498db"
+help:"The return hot water temperature is low (<115°F, while OA Temp is <55°F)."
+mod:2020-11-18T17:25:37.835Z
+pod1
+rule
+ruleFunc:"bpReturnHotWaterTempTooLow(_,_,115°F,55°F,1min)"
+ruleOn:equip and loop and hot and water
+sparkRule
+---
+id:@p:sentientSites:r:25d878e0-c62bc21c "Rule AHU-001 AHU Overcooling Space"
+dis:Rule AHU-001 AHU Overcooling Space
+help:"Fan running, Supply air 5'F less than control setpoint for more than 5 min"
+mod:2020-02-13T21:15:12.417Z
+rule
+ruleCost:""
+ruleFunc:"ruleAHU001(_,_,30min,5,5min)"
+ruleOn:equip and ahu
+---
+id:@p:sentientSites:r:25d8793a-6a96522e "Rule AHU-002 AHU Overheating Space"
+dis:Rule AHU-002 AHU Overheating Space
+help:"Fan running, Supply air 5'F more than control setpoint for more than 5 min"
+mod:2020-02-13T21:16:42.944Z
+rule
+ruleCost:""
+ruleFunc:"ruleAHU002(_,_,30min,5,5min)"
+ruleOn:equip and ahu
+---
+id:@p:sentientSites:r:25d87957-a969b0ab "Rule DHW-002 DHW Unsafe Temperature"
+dis:Rule DHW-002 DHW Unsafe Temperature
+help:"DHW pump on and/or dhw flow (if available), DHW supply temp more than 135'F, check for defective tempering valve."
+mod:2020-02-13T21:17:11.831Z
+rule
+ruleCost:""
+ruleFunc:"ruleDHW002(_,_,30min,135,5min)"
+ruleOn:equip and domestic and hot and water
+---
+id:@p:sentientSites:r:26449224-c5edd5dd "Supply HW temp <120°F and OA temp is <45°F"
+dis:"Supply HW temp <120°F and OA temp is <45°F"
+autoAlert
+color:"#3498db"
+help:"The supply hot water temperature below 120°F while the outdoor temperature is less than 45°F for more than 1 minute."
+mod:2020-12-17T21:52:47.094Z
+pod1
+rule
+ruleFunc:"bpHwSupplyTempTooLow(_,_,120°F,45°F,1min)"
+ruleOn:equip and loop and hot and water and not dhw
+sparkRule
+---
+id:@p:sentientSites:r:264491e4-65bd020a "Supply HW Temperature > 185°F"
+dis:"Supply HW Temperature > 185°F"
+color:"#e74c3c"
+help:"Supply hot water temperature exceeds the expected temperature range (>185°F) for more than 1 minute."
+mod:2020-10-05T18:42:08.126Z
+rule
+ruleFunc:"bpHwSupplyTempTooHigh(_,_,185°F,1min)"
+ruleOn:equip and loop and hot and water and not dhw
+sparkRule
+---
+id:@p:sentientSites:r:26151ac4-0b4eaee9 "Usage Spiked > 2 x Average Rate"
+dis:"Usage Spiked > 2 x Average Rate"
+help:"Usage Spiked > 2 x Average Rate"
+mod:2020-03-30T21:01:56.22Z
+rule
+ruleCost:""
+ruleFunc:"ruleWAT004(_,_,30min,8,2,1hr)"
+ruleOn:equip and meter and water and not riser
+---
+id:@p:sentientSites:r:27075f52-7f1a8c08 "Water Consumption"
+dis:Water Consumption
+color:"#e74c3c"
+help:"Site water consumption min, max, average over time period."
+kpiRule
+mod:2020-10-02T15:45:30.497Z
+rule
+ruleFunc:bpKpiWater
+ruleOn:site
+---
+id:@p:sentientSites:r:26892cdf-ee006b2a "Zone Temp Average"
+dis:Zone Temp Average
+color:"#27ae60"
+help:Average space temperature per site floor
+kpiRule
+mod:2020-11-18T18:13:13.602Z
+pod1
+rachel
+rule
+ruleFunc:"bpZoneTempAvg(_,_,30,100)"
+ruleOn:floor
+---
+id:@p:sentientSites:r:270101a0-c0dad86c "Zone Temp Min and Max"
+dis:Zone Temp Min and Max
+color:"#1abc9c"
+help:""
+kpiRule
+mod:2020-11-18T18:13:13.602Z
+pod1
+rachel
+rule
+ruleFunc:"bpZoneTempMinMax(_,_,30,100)"
+ruleOn:floor
+---
+id:@p:sentientSites:r:2351894a-a5573543 "Empty Trash"
+dis:Empty Trash
+job
+jobExpr:"folioEmptyTrash()"
+jobLastRuntime:144ms
+jobLastStatus:doneOk
+jobLastTime:2020-01-16T15:56:04.908-05:00 New_York
+mod:2022-04-27T01:34:01.416Z
+---
+id:@p:sentientSites:r:280db61f-91bcb011 "gitExport"
+dis:gitExport
+job
+jobExpr:gitExport
+jobLastRuntime:5.487s
+jobLastStatus:doneErr
+jobLastTime:2022-05-01T06:00:08.34-04:00 New_York
+jobSchedule:"on 1 at 06:00:00"
+lennox
+mmc
+mod:2022-05-01T10:00:08.34Z
+msm
+---
+id:@p:sentientSites:r:25d45c8a-e2c39ff6 "Import H2O Data"
+dis:Import H2O Data
+disabled
+job
+jobExpr:"bpContourImportV1()"
+jobSchedule:every 1min
+mod:2022-04-27T01:34:01.416Z
+---
+id:@p:sentientSites:r:25d45483-98ea744a "Import Radiator Lab Data"
+dis:Import Radiator Lab Data
+disabled
+job
+jobExpr:"bpClintonHillImportV1()"
+jobSchedule:every 15min
+mod:2022-04-27T01:34:01.416Z
+---
+id:@p:sentientSites:r:266a6d1c-04592c2e "Monthly History Download to FTP"
+dis:Monthly History Download to FTP
+job
+jobExpr:"rptPointHisCsvOneOutputFtp(\"dis\", lastMonth())"
+jobLastRuntime:16ms
+jobLastStatus:doneOk
+jobLastTime:2022-05-01T09:00:01.99-04:00 New_York
+jobSchedule:"on 1 at 09:00:00"
+lennox
+mmc
+mod:2022-05-01T13:00:01.991Z
+msm
+pod1
+---
+id:@p:sentientSites:r:25e2b10e-165f8394 "Point CSV Test"
+dis:Point CSV Test
+job
+jobExpr:"rptPointHisCsv()"
+jobLastRuntime:3.165s
+jobLastStatus:doneOk
+jobLastTime:2020-02-21T10:30:27.805-05:00 New_York
+mod:2022-04-27T01:34:01.416Z
+---
+id:@p:sentientSites:r:25b3857f-102bcf67 "Point Watch"
+dis:Point Watch
+job
+jobExpr:"pointWatch()"
+jobLastRuntime:0ms
+jobLastStatus:doneOk
+jobLastTime:2022-05-26T10:51:12.948-04:00 New_York
+jobSchedule:every 5min
+lenox
+mmc
+mod:2022-04-27T01:34:01.416Z
+msm
+---
+id:@p:sentientSites:r:272085e2-bc0814e6 "Send Daily Email Alert to Michaelangelo Contacts"
+dis:Send Daily Email Alert to Michaelangelo Contacts
+disabled
+job
+jobExpr:"sendSparksEmailZoneOver74()"
+jobLastRuntime:1.833s
+jobLastStatus:doneOk
+jobLastTime:2021-05-21T09:00:11.641-04:00 New_York
+jobSchedule:"at 09:00:00"
+mod:2022-04-27T01:34:01.416Z
+---
+id:@p:sentientSites:r:26f4dbd5-4cb2fa20 "Send Email Alert"
+dis:Send Email Alert
+job
+jobExpr:"bpEmailAlert(30min)"
+jobLastRuntime:0ms
+jobLastStatus:doneOk
+jobLastTime:2022-05-26T10:54:23.088-04:00 New_York
+jobSchedule:every 2min
+mod:2022-04-27T01:34:01.416Z
+---
+id:@p:sentientSites:r:2710c25e-6d8ca28d "Send Instant Email Alert - 1 min"
+dis:Send Instant Email Alert - 1 min
+job
+jobExpr:"bpEmailAlertInstant()"
+jobLastRuntime:203ms
+jobLastStatus:doneOk
+jobLastTime:2022-05-26T10:54:53.375-04:00 New_York
+jobSchedule:every 1min
+mod:2022-04-27T01:34:01.416Z
+---
+id:@p:sentientSites:r:25e2acc4-885a2589 "TestHistoryReport"
+dis:TestHistoryReport
+job
+jobExpr:"rptEquipPointHisCsv()"
+jobLastRuntime:1.818s
+jobLastStatus:doneOk
+jobLastTime:2020-02-21T10:10:23.258-05:00 New_York
+mod:2022-04-27T01:34:01.416Z
+---
+id:@p:sentientSites:r:269106a7-88472ca1 "Bright Power"
+dis:Bright Power
+appName:brightpower
+mod:2020-07-28T14:29:49.05Z
+view:brightPower
+src:
+  view: {inherit:"tile"}
+  span: {var kind:"Span" input defVal:Span("lastWeek")}
+  sites: {var kind:"Ref<site>[]" input share navSelAny defVal:[@nav:site.site.aWQ6QHA6c2VudGllbnRTaXRlczpyOjI1NDllYWU3LWIzZmRiZjNlICI5Ny00NSBRdWVlbnMgQmx2ZCI] navCluster}
+  uiViewBar: {var kind:"Dict" defVal:{}}
+  layout: {var kind:"Str" defVal:"grid 6x6; 0 0 3 3; 3 0 3 3; 0 3 6 3"}
+  spark: Trio:
+    view: {inherit:"sparkSwivel"}
+    uiViewBar: {kind:"Str" defVal:""}
+    targets: {kind:"Ref<site>[]" defVal:[@nav:site.all,@nav:site.site.aWQ6QHA6c2VudGllbnRTaXRlczpyOjI1NzkzY2YzLWQyNGJhNjEzICIxODUgQ2xpbnRvbiBBdmVudWUgLSBOb3J0aCI]}
+    span: {kind:R binding:"../span" defVal:R}
+    opts: {defVal:{rows:{dis:"Rule" select:"ruleRef.dis"} cells:[{dis:"Duration" viz:"barCell" fold:"sum" select:"dur"},{dis:"Cost" viz:"text" fold:"sum" select:"cost"},{dis:"Periods" viz:"runtimeCell" fold:"periodUnion" select:"periods"},{dis:"Equips" viz:"text" fold:"list" select:"targetRef.equip.id"}]}}
+  energy: Trio:
+    view: {inherit:"energyUsage"}
+    sites: {kind:R navSelAny:R binding:"../sites" navCluster:R}
+    span: {kind:R binding:"../span" defVal:R}
+    opts: {defVal:{mode:"lineChart" norms:[] point:"energy and equipRef->elec and sensor" rollup:{fold:"auto" interval:"auto"} baseline:"none"}}
+    uiViewBar: {var kind:"Dict" defVal:{}}
+  smartsheet: Trio:
+    view: {inherit:"iframe"}
+    data: {expr:"`https://app.smartsheet.com/b/publish?EQBCT=e7175503cdc94cf584e5ca4a608904ec`"}
+  
+---
+id:@p:sentientSites:r:271b52ad-7b55d98b "Email Sparks"
+dis:Email Sparks
+appName:emailSparks
+mod:2020-10-15T19:10:01.262Z
+tomtest
+view:vwEmailSparks
+src:
+  view: {inherit:"table"}
+  data: {expr:"readAll((equip or point) and siteRef->mAngelo).ruleSparks(yesterday)"}
+  
+---
+id:@p:sentientSites:r:25d71922-5a7e8c03 "Equipment Summary Report View"
+dis:Equipment Summary Report View
+appName:equipSum
+mod:2020-07-28T14:31:00.667Z
+view:vwEquipSum
+src:
+  view: {inherit:"chart"}
+  points: {var kind:"Ref<point>[]" input}
+  span: {var kind:"Span" input}
+  data: {expr:"readByIds({{points}}).hisRead({{span}}).hisRollupAuto(15min)"}
+---
+id:@p:sentientSites:r:268e4e08-3cac1e1e "ESC"
+dis:ESC
+appName:brightpower
+mod:2020-06-30T19:34:11.567Z
+view:esc
+src:
+  view: {inherit:"tile"}
+  layout: {var kind:"Str" defVal:"grid 6x6; 0 0 6 6"}
+  esc: Trio:
+    view: {inherit:"iframe"}
+    data: {expr:"`https://eng.energyscorecards.com`"}
+  
+---
+id:@p:sentientSites:r:278f6e54-2924c27a "Files"
+dis:Files
+afPodBuilder
+afPodBuilderFilesView
+appName:afPodBuilder
+mod:2021-01-11T20:15:16.547Z
+order:300
+skySparkVer:"3.0.25"
+su
+view:afPodBuilder_filesViewOld
+src:
+  // call "views()" to find this handy source of the "file" view!
+  view	: { uiType:"uiBuilder::IoBuilder" }
+  newDir	: { disKey:"ui::newDir"  action:"ioBuilderNewDir"  select tag:"uri" }
+  newFile	: { disKey:"ui::newFile" action:"ioBuilderNewFile" select tag:"uri" }
+  upload	: { disKey:"ui::upload"  action:"ioBuilderUpload"  upload multi     }
+  save	: { disKey:"ui::save"    action:"ioBuilderSave"    select tag:"uri" }
+  rename	: { disKey:"ui::rename"  action:"ioBuilderRename"  select tag:"uri" }
+  delete	: { disKey:"ui::delete"  action:"ioDelete" select tag:"uri" confirm:{icon:"warn" disKey:"ui::ioDeleteConfirm" detailsKey:"ui::ioDeleteConfirmDetails"} }
+  handle	: { var kind:"Uri" defVal:`io/afPodBuilder/` }
+  data	: { expr:"ioDir({{handle}})" }
+  
+  // this worked well, except you can't create top level pod dirs!
+  //data	: { expr:"afPodBuilder_ioDir()" }
+---
+id:@p:sentientSites:r:276b8edb-63de805b "Smartsheet Spark View"
+dis:Smartsheet Spark View
+appName:smartsheetSparkView
+mod:2020-12-15T15:12:27.572Z
+view:sparkView
+src:
+  view: {inherit:"sparkSwivel"}
+  uiViewBar: {kind:"Str" defVal:""}
+  
+---
+id:@p:sentientSites:r:270f7fe4-571f8363 "Test Chart"
+dis:Test Chart
+appName:misc
+mod:2020-10-06T20:32:03.465Z
+view:testChart
+src:
+  view: {inherit:"text"}
+  var: {var kind:"Span" input}
+  site: {var kind:"Ref<site>" input}
+  data: {expr:"{{site}}"}
+  
